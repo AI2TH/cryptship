@@ -63,6 +63,16 @@ The demo packs a tiny Python app, issues a license, builds the image, then
 runs it to show it decrypts and works, and finally tampers with the license to
 show the loader refuses it.
 
+## Documentation
+
+- **[docs/DIAGRAMS.md](docs/DIAGRAMS.md)** — what it solves + flow and
+  architecture diagrams (how it works, visually).
+- **[docs/HOWTO.md](docs/HOWTO.md)** — step-by-step guide for every workflow
+  (build, each binding mode, compile, hardening, the server, rotation).
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design, threat model, license
+  format, roadmap.
+- **[deploy/README.md](deploy/README.md)** — hardened docker / Kubernetes deployment.
+
 ## Deployment modes = key providers
 
 Air-gapped, on-prem, and cloud differ only in **how the content key is
