@@ -14,3 +14,6 @@ bin/
 /cryptship
 /cryptship-loader
 /cryptship-server
+
+# mermaid validation temp
+.mermaid-check.*

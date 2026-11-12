@@ -119,9 +119,9 @@ sequenceDiagram
   L->>S: POST /v1/key — license_id, nonce [, attestation]
   S->>S: denylist check (revocation)
   S->>S: attestation check (attested mode only)
-  S->>S: secret = HKDF(master, license_id)
-  S-->>L: signed response — secret, not_after; echoes nonce
-  L->>L: verify signature + nonce
+  S->>S: secret = HKDF of master and license_id
+  S-->>L: signed response - secret and not_after, echoes nonce
+  L->>L: verify signature and nonce
   L->>L: derive KEK, unwrap content key
   L->>L: decrypt to tmpfs, exec app
 ```

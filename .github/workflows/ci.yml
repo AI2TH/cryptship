@@ -37,3 +37,15 @@ jobs:
 
       - name: test
         run: go test -race ./...
+
+  docs-diagrams:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: install mermaid-cli
+        run: npm install -g @mermaid-js/mermaid-cli@11
+      - name: validate mermaid diagrams
+        run: bash scripts/check-mermaid.sh
