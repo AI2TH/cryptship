@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMG="ghcr.io/mermaid-js/mermaid-cli/mermaid-cli:latest"
+IMG="ghcr.io/mermaid-js/mermaid-cli/mermaid-cli@sha256:18938e53497376d524e04b1fc0bf7b6d61a491ce9ff7032bb2855d57155acb10"
 # Keep the temp dir under the repo so the Docker fallback (colima) can mount it;
 # /var/folders and /tmp are not shared into the VM by default.
 tmp="$(mktemp -d "$ROOT/.mermaid-check.XXXXXX")"
