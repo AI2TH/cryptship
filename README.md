@@ -1,5 +1,9 @@
 # cryptship
 
+[![CI](https://github.com/AI2TH/cryptship/actions/workflows/ci.yml/badge.svg)](https://github.com/AI2TH/cryptship/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/AI2TH/cryptship)](https://github.com/AI2TH/cryptship/releases/latest)
+[![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 Ship encrypted, license-gated application code inside container images.
 
 Docker images ship your source in the clear. Anyone with the image can
