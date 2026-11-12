@@ -1,0 +1,18 @@
+# Online-bound variant: the license carries no secret, only the server URL. The
+# loader fetches the binding secret from cryptship-server at run time. Build
+# context is the repo root:
+#   docker build -f examples/demo-python/Dockerfile.online -t cryptship-online-app .
+
+FROM golang:1.24 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY pkg ./pkg
+COPY cmd ./cmd
+RUN CGO_ENABLED=0 go build -trimpath -o /loader ./cmd/cryptship-loader
+
+FROM python:3.12-slim
+COPY --from=build /loader /cryptship-loader
+COPY examples/demo-python/_work_online/payload.enc  /cryptship/payload.enc
+COPY examples/demo-python/_work_online/license.json /cryptship/license.json
+COPY examples/demo-python/_work_online/vendor.pub   /cryptship/vendor.pub
+ENTRYPOINT ["/cryptship-loader", "--", "python", "app.py"]

@@ -1,0 +1,16 @@
+{
+  "_comment": "cryptship hardened seccomp profile. Starts from allow-all and denies the syscalls an in-container attacker uses to read another process's memory. Run: docker run --security-opt seccomp=deploy/seccomp.json ... Note: a container/host root can start a process OUTSIDE this profile (e.g. a privileged sidecar), so this stops a non-root / in-container attacker, not host root. Only a confidential-compute key provider stops host root.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "process_vm_readv",
+        "process_vm_writev",
+        "kcmp"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

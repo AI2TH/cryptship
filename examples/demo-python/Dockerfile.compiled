@@ -1,0 +1,21 @@
+# Compiled variant: the payload was packed with --transform-cmd so it holds
+# Python BYTECODE (app.pyc), not source. Build context is the repo root:
+#   docker build -f examples/demo-python/Dockerfile.compiled -t cryptship-demo-compiled .
+#
+# ENTRYPOINT/CMD are split so a diagnostic command can override CMD to inspect
+# the decrypted tree (docker run ... -- sh -c '...').
+
+FROM golang:1.24 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY pkg ./pkg
+COPY cmd ./cmd
+RUN CGO_ENABLED=0 go build -trimpath -o /loader ./cmd/cryptship-loader
+
+FROM python:3.12-slim
+COPY --from=build /loader /cryptship-loader
+COPY examples/demo-python/_work_compiled/payload.enc  /cryptship/payload.enc
+COPY examples/demo-python/_work_compiled/license.json /cryptship/license.json
+COPY examples/demo-python/_work_compiled/vendor.pub   /cryptship/vendor.pub
+ENTRYPOINT ["/cryptship-loader"]
+CMD ["--", "python", "app.pyc"]

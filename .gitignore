@@ -1,0 +1,16 @@
+# Vendor secrets and build artifacts — never commit these.
+**/_work/
+**/_work_compiled/
+**/_work_online/
+*.key
+content.key
+vendor.key
+*.enc
+license.json
+*.tar
+bin/
+
+# built binaries at repo root
+/cryptship
+/cryptship-loader
+/cryptship-server
