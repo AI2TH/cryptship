@@ -55,7 +55,7 @@ func (a Attested) ContentKey(ctx context.Context, lic *license.License) ([]byte,
 // noTEE is the default attester on hosts without confidential-compute hardware.
 type noTEE struct{}
 
-func (noTEE) Name() string { return "none" }
+func (noTEE) Name() string                                     { return "none" }
 func (noTEE) Evidence(context.Context, []byte) ([]byte, error) { return nil, ErrNoTEE }
 
 // DefaultAttester returns the attester for the current host. On non-CC hardware
