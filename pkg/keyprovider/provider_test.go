@@ -150,8 +150,8 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 	// Evidence that is not bound to this request's nonce (e.g. replayed from
 	// an earlier request) is refused by the server.
 	stale := staleAttester{bindData: online.AttestationNonce(lic.Claims.LicenseID, []byte("an-older-nonce!!"))}
-	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: stale}).ContentKey(context.Background(), lic); err == nil {
-		t.Fatal("evidence for another nonce was accepted")
+	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: stale}).ContentKey(context.Background(), lic); !errors.Is(err, ErrDenied) {
+		t.Fatalf("evidence for another nonce: err = %v, want ErrDenied", err)
 	}
 }
 
