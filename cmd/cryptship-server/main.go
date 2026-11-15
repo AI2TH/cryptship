@@ -31,7 +31,8 @@ func main() {
 	keyID := flag.String("key-id", "v1", "signing key id advertised in responses")
 	addr := flag.String("addr", ":8080", "listen address")
 	ttl := flag.Duration("ttl", 24*time.Hour, "validity of each key answer")
-	revoke := flag.String("revoke", "", "comma-separated license ids to deny")
+	revoke := flag.String("revoke", "", "comma-separated license ids to deny (static)")
+	revokeFile := flag.String("revoke-file", "", "path to a live denylist (one license id per line); edit it to revoke without restarting")
 	requireAtt := flag.Bool("require-attestation", false, "require verified TEE attestation (fails to start: no verifier is built in yet)")
 	flag.Parse()
 
@@ -51,11 +52,12 @@ func main() {
 	}
 
 	srv := &licenseserver.Server{
-		Master:  master,
-		SignKey: ed25519.PrivateKey(priv),
-		KeyID:   *keyID,
-		TTL:     *ttl,
-		Revoked: revoked,
+		Master:      master,
+		SignKey:     ed25519.PrivateKey(priv),
+		KeyID:       *keyID,
+		TTL:         *ttl,
+		Revoked:     revoked,
+		RevokedFile: *revokeFile,
 	}
 	verifier, err := attestationVerifier(*requireAtt, builtinVerifier())
 	must(err, "--require-attestation")

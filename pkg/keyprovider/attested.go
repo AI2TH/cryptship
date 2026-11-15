@@ -49,7 +49,7 @@ func (a Attested) ContentKey(ctx context.Context, lic *license.License) ([]byte,
 	}
 	return fetchAndUnwrap(ctx, a.Keys, a.Client, lic, func(nonce []byte) ([]byte, error) {
 		return a.Attester.Evidence(ctx, online.AttestationNonce(lic.Claims.LicenseID, nonce))
-	})
+	}, nil) // attested never uses the outage grace cache — it must always re-attest
 }
 
 // noTEE is the default attester on hosts without confidential-compute hardware.

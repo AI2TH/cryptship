@@ -225,18 +225,26 @@ remote execution.
 - **Offline:** by expiry. Issue short-lived licenses and renew. A distributed
   denylist only helps for clients that check in.
 - **Online:** the key server refuses to return the binding secret for a revoked
-  license, so its next start fails (revoke with `cryptship-server --revoke`;
-  running instances keep running). An online-bound app does not start while the
-  server is unreachable.
+  license, so its next start fails. Revoke with `cryptship-server --revoke`
+  (static) or `--revoke-file` (a live denylist re-read per request — no restart);
+  running instances keep running. By default an online-bound app does not start
+  while the server is unreachable; `CRYPTSHIP_ONLINE_GRACE=<dur>` lets it ride out
+  an outage using a machine-sealed cached secret for that long (a reachable
+  server that says revoked still wins).
+- **Signed `revocation_url` check:** the loader sends a nonce and verifies the
+  server's signed answer against the key ring, so an on-path attacker or captive
+  portal cannot forge "not revoked"; `CRYPTSHIP_REVOCATION=closed` also rejects
+  an unsigned "active" answer.
 
 ## Roadmap
 
 1. **TPM provider** — seal the content key to the TPM so a copied license is
    useless off the physical machine, even to root.
 2. **Online provider + reference license server** — IMPLEMENTED (signed,
-   nonce-bound replies; revocation by denylist). Still open: seat management
-   (the `machine` field is sent but not enforced), machine (re)activation API,
-   and offline grace caching of the online key.
+   nonce-bound replies; live `--revoke-file` denylist; signed `revocation_url`
+   check; `CRYPTSHIP_ONLINE_GRACE` outage caching). Still open: seat management
+   (the `machine` field is sent but not enforced) and a machine (re)activation
+   API.
 3. **Cloud KMS provider** — wrap the content key with AWS/GCP/Azure KMS; unwrap
    gated by cloud IAM + signed instance identity.
 4. **Confidential-compute provider** — SEV-SNP/TDX with remote attestation; the
