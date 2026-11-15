@@ -38,6 +38,20 @@ func DeriveSecret(master []byte, licenseID string) ([]byte, error) {
 	return hkdf.Key(sha256.New, master, []byte(licenseID), "cryptship/online-secret/v1", SecretSize)
 }
 
+// AttestationNonce is the value attested-mode evidence must commit to (for
+// example in the SEV-SNP / TDX REPORT_DATA field): a hash of the license id and
+// the request nonce, so evidence made for one request or license does not
+// verify for another. The loader's attester and the server's verifier both
+// compute it.
+func AttestationNonce(licenseID string, nonce []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte("cryptship/attestation-nonce/v1\x00"))
+	h.Write([]byte(licenseID))
+	h.Write([]byte{0})
+	h.Write(nonce)
+	return h.Sum(nil)
+}
+
 // ResponseSigningInput is the fixed byte layout the server signs and the loader
 // verifies.
 func ResponseSigningInput(r KeyResponse) []byte {

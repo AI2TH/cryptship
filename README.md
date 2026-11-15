@@ -102,13 +102,16 @@ acquired**. That is a single pluggable interface (`pkg/keyprovider`):
 |---|---|---|---|
 | **Air-gapped** | `offline` | machine fingerprint, or none | expiry only |
 | **On-prem / cloud** | `online` | per-license secret held by your server | **real** — the server declines |
-| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | planned: interface + mock only today |
+| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | planned: interfaces + test-only verifier today |
 
 The loader, license format, crypto, and app are identical across all modes — only
 the key provider differs. `offline` (none/strict/pool) and `online` are built and
 tested; `online` uses the reference `cryptship-server` (a stateless key broker).
-`attested` is built behind an `Attester` interface with a mock for tests — real
-SEV-SNP/TDX quote generation needs confidential-compute hardware (see
+`attested` is built behind an `Attester` interface (loader) and an
+`attest.Verifier` interface (server), each with a test-only implementation. There
+is no production verifier yet, so `cryptship-server --require-attestation`
+refuses to start rather than accept evidence it cannot check. Real SEV-SNP/TDX
+quote generation needs confidential-compute hardware (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
 
 ## Hardening & anti-extraction
@@ -153,7 +156,8 @@ the unwrap); machine binding (none / strict / pool); online key provider + refer
 `cryptship-server`; signing-key rotation (key ring); configurable revocation
 (open / closed / grace); the compile/transform seam; loader + container
 hardening; per-license watermarking; and the attested (confidential-compute)
-provider behind an `Attester` interface with a mock key broker.
+provider behind `Attester` / `attest.Verifier` interfaces with test-only
+implementations (no production verifier yet).
 
 **Roadmap:** a real SEV-SNP/TDX `Attester` + Trustee-style KBS integration,
 TPM-sealed binding, cloud-KMS wrapping, offline grace caching for `online`, and

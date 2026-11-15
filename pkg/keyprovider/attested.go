@@ -5,12 +5,14 @@ import (
 	"errors"
 
 	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 // Attester produces TEE attestation evidence (e.g. an AMD SEV-SNP report or an
 // Intel TDX quote). Real implementations read /dev/sev-guest or /dev/tdx_guest
-// and commit bindData (e.g. license id + an ephemeral key) into the report's
-// REPORT_DATA field. ErrNoTEE is returned where no TEE is available.
+// and commit bindData (online.AttestationNonce of the license id and request
+// nonce) into the report's REPORT_DATA field. ErrNoTEE is returned where no
+// TEE is available. pkg/attest/attesttest has a test-only implementation.
 type Attester interface {
 	Name() string
 	Evidence(ctx context.Context, bindData []byte) ([]byte, error)
@@ -45,11 +47,9 @@ func (a Attested) ContentKey(ctx context.Context, lic *license.License) ([]byte,
 	if a.Attester == nil {
 		return nil, ErrNoTEE
 	}
-	evidence, err := a.Attester.Evidence(ctx, []byte(lic.Claims.LicenseID))
-	if err != nil {
-		return nil, err
-	}
-	return fetchAndUnwrap(ctx, a.Keys, a.Client, lic, evidence)
+	return fetchAndUnwrap(ctx, a.Keys, a.Client, lic, func(nonce []byte) ([]byte, error) {
+		return a.Attester.Evidence(ctx, online.AttestationNonce(lic.Claims.LicenseID, nonce))
+	})
 }
 
 // noTEE is the default attester on hosts without confidential-compute hardware.
@@ -61,18 +61,3 @@ func (noTEE) Evidence(context.Context, []byte) ([]byte, error) { return nil, Err
 // DefaultAttester returns the attester for the current host. On non-CC hardware
 // it reports ErrNoTEE; swap in an SEV-SNP/TDX attester to enable attested mode.
 func DefaultAttester() Attester { return noTEE{} }
-
-// MockAttester returns fixed evidence. For tests and local demos only — it
-// proves nothing about the runtime environment.
-type MockAttester struct{ Token []byte }
-
-// Name implements Attester.
-func (MockAttester) Name() string { return "mock" }
-
-// Evidence implements Attester.
-func (m MockAttester) Evidence(context.Context, []byte) ([]byte, error) {
-	if len(m.Token) == 0 {
-		return []byte("mock-evidence"), nil
-	}
-	return m.Token, nil
-}
