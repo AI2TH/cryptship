@@ -71,6 +71,8 @@ func CheckSigningInput(r CheckResponse) []byte {
 	b := []byte("cryptship/revocation-check/v1\x00")
 	b = append(b, r.LicenseID...)
 	b = append(b, 0)
+	b = append(b, r.SigningKeyID...)
+	b = append(b, 0)
 	b = append(b, r.Nonce...)
 	if r.Revoked {
 		b = append(b, 1)
@@ -85,6 +87,8 @@ func CheckSigningInput(r CheckResponse) []byte {
 func ResponseSigningInput(r KeyResponse) []byte {
 	b := []byte("cryptship/online-resp/v1\x00")
 	b = append(b, r.LicenseID...)
+	b = append(b, 0)
+	b = append(b, r.SigningKeyID...)
 	b = append(b, 0)
 	b = append(b, r.Nonce...)
 	b = append(b, r.Secret...)

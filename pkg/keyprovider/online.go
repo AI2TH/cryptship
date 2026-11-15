@@ -100,11 +100,13 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// Server unreachable: ride out the outage with a cached secret, if any.
+		// Server unreachable: ride out the outage with the cached content key, if any.
 		if grace != nil {
 			if key, gerr := graceUnwrap(grace, c); gerr == nil {
 				fmt.Fprintln(os.Stderr, "cryptship: license server unreachable, using grace cache:", err)
 				return key, nil
+			} else if !errors.Is(gerr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "cryptship: grace cache present but unusable:", gerr)
 			}
 		}
 		return nil, fmt.Errorf("online: %w", err)
@@ -140,11 +142,18 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, online.ResponseSigningInput(kr), kr.Sig) {
 		return nil, errors.New("online: bad response signature")
 	}
-	if grace != nil {
-		graceStore(grace, c, kr.Secret, kr.NotAfter) // best effort
-	}
 	defer crypto.Wipe(kr.Secret)
-	return Unwrap(c, kr.Secret)
+	key, err := Unwrap(c, kr.Secret)
+	if err != nil {
+		return nil, err
+	}
+	if grace != nil {
+		// Cache the content key, not the per-license secret: the content key is
+		// per build and already lives in the running app's memory, so caching it
+		// adds no portable license-wide credential.
+		graceStore(grace, c, key, kr.NotAfter) // best effort
+	}
+	return key, nil
 }
 
 // --- outage grace cache ---
@@ -152,9 +161,15 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 const graceAAD = "cryptship/online-grace/v1"
 
 type graceRecord struct {
-	Sealed   []byte `json:"sealed"`    // AES-256-GCM(secret) under the machine KEK
-	CachedAt int64  `json:"cached_at"` // unix seconds
-	NotAfter int64  `json:"not_after"` // server-stated validity (informational)
+	Sealed   []byte `json:"sealed"`    // AES-256-GCM(content key); AAD binds cached_at+not_after
+	CachedAt int64  `json:"cached_at"` // unix seconds (authenticated via AAD)
+	NotAfter int64  `json:"not_after"` // server-stated validity (authenticated and enforced)
+}
+
+// graceAD binds the timestamps into the AEAD, so editing cached_at/not_after in
+// the on-disk JSON (to extend the window) makes the open fail.
+func graceAD(licenseID string, cachedAt, notAfter int64) []byte {
+	return []byte(fmt.Sprintf("%s|%s|%d|%d", graceAAD, licenseID, cachedAt, notAfter))
 }
 
 // graceKEK derives the key that seals the cached secret. It binds to the machine
@@ -194,17 +209,18 @@ func gracePath(dir, licenseID string) string {
 	return filepath.Join(dir, "online-grace-"+url.PathEscape(licenseID))
 }
 
-func graceStore(g *graceConfig, c license.Claims, secret []byte, serverNotAfter int64) {
+func graceStore(g *graceConfig, c license.Claims, contentKey []byte, serverNotAfter int64) {
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
 		return
 	}
 	defer crypto.Wipe(kek)
-	sealed, err := crypto.Seal(kek, secret, []byte(graceAAD+"|"+c.LicenseID))
+	cachedAt := time.Now().Unix()
+	sealed, err := crypto.Seal(kek, contentKey, graceAD(c.LicenseID, cachedAt, serverNotAfter))
 	if err != nil {
 		return
 	}
-	rec, err := json.Marshal(graceRecord{Sealed: sealed, CachedAt: time.Now().Unix(), NotAfter: serverNotAfter})
+	rec, err := json.Marshal(graceRecord{Sealed: sealed, CachedAt: cachedAt, NotAfter: serverNotAfter})
 	if err != nil {
 		return
 	}
@@ -214,6 +230,9 @@ func graceStore(g *graceConfig, c license.Claims, secret []byte, serverNotAfter 
 	_ = os.WriteFile(gracePath(g.dir, c.LicenseID), rec, 0o600)
 }
 
+// graceUnwrap returns the cached content key if the cache is present, within the
+// local window AND the server-stated NotAfter, not clock-rolled-back, and its
+// authenticated timestamps are intact.
 func graceUnwrap(g *graceConfig, c license.Claims) ([]byte, error) {
 	b, err := os.ReadFile(gracePath(g.dir, c.LicenseID))
 	if err != nil {
@@ -223,21 +242,26 @@ func graceUnwrap(g *graceConfig, c license.Claims) ([]byte, error) {
 	if err := json.Unmarshal(b, &rec); err != nil {
 		return nil, err
 	}
-	if rec.CachedAt > time.Now().Unix()+license.ClockSkew {
+	now := time.Now().Unix()
+	if rec.CachedAt > now+license.ClockSkew {
 		return nil, errors.New("grace cache: cached in the future (clock rollback)")
 	}
 	if time.Since(time.Unix(rec.CachedAt, 0)) > g.window {
 		return nil, errors.New("grace cache: older than the grace window")
+	}
+	if rec.NotAfter != 0 && now > rec.NotAfter {
+		return nil, errors.New("grace cache: past the server-stated validity")
 	}
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
 		return nil, err
 	}
 	defer crypto.Wipe(kek)
-	secret, err := crypto.Open(kek, rec.Sealed, []byte(graceAAD+"|"+c.LicenseID))
+	// Open also authenticates CachedAt/NotAfter via the AAD: editing them to
+	// widen the window makes this fail.
+	contentKey, err := crypto.Open(kek, rec.Sealed, graceAD(c.LicenseID, rec.CachedAt, rec.NotAfter))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("grace cache: %w (tampered, or a different machine)", err)
 	}
-	defer crypto.Wipe(secret)
-	return Unwrap(c, secret)
+	return contentKey, nil
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/AI2TH/cryptship/pkg/attest"
+	"github.com/AI2TH/cryptship/pkg/crypto"
 	"github.com/AI2TH/cryptship/pkg/online"
 )
 
@@ -38,10 +40,8 @@ type Server struct {
 	// attested-license secrets to anyone who asks.
 	Verifier attest.Verifier
 
-	mu       sync.Mutex
-	fileSet  map[string]bool
-	fileMod  time.Time
-	fileSize int64
+	mu         sync.Mutex
+	denyWarned bool // warn once if RevokedFile becomes unreadable
 }
 
 func (s *Server) ttl() time.Duration {
@@ -52,8 +52,9 @@ func (s *Server) ttl() time.Duration {
 }
 
 // isRevoked reports whether a license id is denied, by the static map or the
-// live-reloaded RevokedFile. The file is re-read only when its mtime or size
-// changes.
+// live RevokedFile. The file is re-read on EVERY call (it is tiny): this is a
+// security control, so freshness beats caching — a stale cache could keep
+// honouring a just-revoked license (e.g. on a coarse-mtime filesystem).
 func (s *Server) isRevoked(id string) bool {
 	if s.Revoked[id] {
 		return true
@@ -61,28 +62,32 @@ func (s *Server) isRevoked(id string) bool {
 	if s.RevokedFile == "" {
 		return false
 	}
+	f, err := os.Open(s.RevokedFile)
+	if err != nil {
+		s.warnDenyUnreadable(err)
+		return false // file-based revocation unavailable; the static map still applies
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) warnDenyUnreadable(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fi, err := os.Stat(s.RevokedFile)
-	if err != nil {
-		s.fileSet = nil // missing/unreadable: only the static map applies
-		return false
+	if !s.denyWarned {
+		fmt.Fprintf(os.Stderr, "cryptship-server: WARNING: revoke-file unreadable, file-based revocation disabled: %v\n", err)
+		s.denyWarned = true
 	}
-	if s.fileSet == nil || !fi.ModTime().Equal(s.fileMod) || fi.Size() != s.fileSize {
-		set := map[string]bool{}
-		if f, err := os.Open(s.RevokedFile); err == nil {
-			sc := bufio.NewScanner(f)
-			for sc.Scan() {
-				line := strings.TrimSpace(sc.Text())
-				if line != "" && !strings.HasPrefix(line, "#") {
-					set[line] = true
-				}
-			}
-			f.Close()
-		}
-		s.fileSet, s.fileMod, s.fileSize = set, fi.ModTime(), fi.Size()
-	}
-	return s.fileSet[id]
 }
 
 // Handler exposes POST /v1/key and GET /v1/check.
@@ -118,6 +123,7 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
+	defer crypto.Wipe(secret)
 	resp := online.KeyResponse{
 		LicenseID:    req.LicenseID,
 		Nonce:        req.Nonce,

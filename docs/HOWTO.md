@@ -78,7 +78,10 @@ ENTRYPOINT ["/cryptship-loader", "--", "python", "app.py"]
 ```
 
 Everything after `--` is the command to run after decryption (the loader `cd`s
-into the extracted app dir first). Run it with the decrypt dir on tmpfs:
+into the extracted app dir first). If you omit `-- <command>`, the loader runs
+`./entrypoint` from the extracted tree and, if there is none, exits with
+`locate command "./entrypoint": ... not found` — so always pass your command.
+Run it with the decrypt dir on tmpfs:
 
 ```bash
 docker run --rm --tmpfs /run/cryptship your-image
@@ -113,6 +116,14 @@ cryptship issue ... --binding strict --fingerprint 8af75d... ...
 ```
 In a container, bind-mount a stable id so the fingerprint is readable and
 constant: `-v /etc/machine-id:/etc/machine-id:ro`.
+
+> **Note:** `cryptship fingerprint` reads **Linux** identifiers (`/etc/machine-id`,
+> DMI) — it is meant to run on the (Linux) deploy host, and returns an error on
+> macOS/Windows. To exercise strict/pool **locally without real machine ids**,
+> build the loader with the dev tag and set `CRYPTSHIP_FINGERPRINT`:
+> `go build -tags cryptship_devfp ./cmd/cryptship-loader` then run it with
+> `-e CRYPTSHIP_FINGERPRINT=machineA`. This override is **compiled out of
+> production builds**, so it can't be used to defeat binding on a real deployment.
 
 ### pool — a set of machines
 Wrap to several fingerprints; any one of them decrypts. For clusters with known

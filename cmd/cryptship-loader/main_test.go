@@ -35,28 +35,20 @@ func TestPrepareDirReusesItsOwnDir(t *testing.T) {
 	if err := prepareDir(dir); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate a completed prior run: extracted files plus the manifest that
+	// marks the dir as cryptship's.
 	if err := os.WriteFile(filepath.Join(dir, "old.py"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Second run over the first run's tree: emptied and re-marked.
-	if err := prepareDir(dir); err != nil {
-		t.Fatalf("second prepareDir: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "old.py")); !os.IsNotExist(err) {
-		t.Fatal("old extraction not removed")
-	}
-	if _, err := os.Stat(filepath.Join(dir, extractMarker)); err != nil {
-		t.Fatalf("marker missing: %v", err)
-	}
-	// A dir left by an older loader (manifest, no marker) is accepted too.
-	if err := os.Remove(filepath.Join(dir, extractMarker)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, manifestName), []byte("{}"), 0o400); err != nil {
 		t.Fatal(err)
 	}
+	// Second run over that tree: emptied because the manifest marks it as ours.
 	if err := prepareDir(dir); err != nil {
-		t.Fatalf("prepareDir over an older loader's dir: %v", err)
+		t.Fatalf("second prepareDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old.py")); !os.IsNotExist(err) {
+		t.Fatal("old extraction not removed")
 	}
 }
 

@@ -152,11 +152,9 @@ func run(cfg config) error {
 	return execApp(cfg, lic.Claims)
 }
 
-// extractMarker is created in the extract dir before anything is extracted,
-// so a later run knows the directory is cryptship's to empty.
-const extractMarker = ".cryptship-extract-dir"
-
-// manifestName is the per-license watermark written after extraction.
+// manifestName is the per-license watermark written after extraction. Its
+// presence also marks the extract dir as cryptship's to empty on a later run,
+// so there is no separate marker file to collide with payload contents.
 const manifestName = ".cryptship-manifest.json"
 
 // prepareDir empties the extract dir for a fresh extraction. It only deletes
@@ -178,8 +176,8 @@ func prepareDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) > 0 && !hasEntry(entries, extractMarker) && !hasEntry(entries, manifestName) {
-		return fmt.Errorf("refusing to empty extract dir %s: it is not empty and was not created by cryptship-loader (no %s); point CRYPTSHIP_EXTRACT at an empty directory", abs, extractMarker)
+	if len(entries) > 0 && !hasEntry(entries, manifestName) {
+		return fmt.Errorf("refusing to empty extract dir %s: it is not empty and has no %s from a previous cryptship run; point CRYPTSHIP_EXTRACT at an empty directory", abs, manifestName)
 	}
 	// Empty the dir without removing it — it may be the tmpfs mount point.
 	for _, e := range entries {
@@ -187,10 +185,7 @@ func prepareDir(dir string) error {
 			return fmt.Errorf("clean extract dir: %w", err)
 		}
 	}
-	if err := os.Chmod(abs, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(abs, extractMarker), nil, 0o400)
+	return os.Chmod(abs, 0o700)
 }
 
 func hasEntry(entries []os.DirEntry, name string) bool {
@@ -285,8 +280,12 @@ func enforceRevocation(lic *license.License, ring license.KeyRing) error {
 		return fmt.Errorf("license %s has been revoked", lic.Claims.LicenseID)
 	}
 	if err == nil && (signed || mode != "closed") {
-		_ = os.MkdirAll(filepath.Dir(sf), 0o700)
-		_ = os.WriteFile(sf, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600)
+		// Only a SIGNED "active" answer refreshes the grace clock; an unsigned
+		// answer (captive portal / on-path) must not be able to extend grace.
+		if signed {
+			_ = os.MkdirAll(filepath.Dir(sf), 0o700)
+			_ = os.WriteFile(sf, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600)
+		}
 		return nil
 	}
 	if err == nil && !signed && mode == "closed" {

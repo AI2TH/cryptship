@@ -77,11 +77,15 @@ tamper step also run in containers.
 bash scripts/demo.sh
 ```
 
-To install the tools directly (Go 1.24 or later):
+To install the vendor-side tools directly (Go 1.24 or later):
 
 ```bash
-go install github.com/AI2TH/cryptship/cmd/...@latest
+go install github.com/AI2TH/cryptship/cmd/cryptship@latest
+go install github.com/AI2TH/cryptship/cmd/cryptship-server@latest
 ```
+
+(The loader, `cmd/cryptship-loader`, is built *into your image* from source — see the
+Dockerfiles — so there's no need to install it on your host.)
 
 The demo packs a tiny Python app, issues a license, builds the image, then
 **`docker save`s it, unpacks every layer and greps for a marker planted in the
@@ -97,6 +101,7 @@ works, and finally tampers with the license to show the loader refuses it.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design, threat model, license
   format, roadmap.
 - **[deploy/README.md](deploy/README.md)** — hardened docker / Kubernetes deployment.
+- **[SECURITY.md](SECURITY.md)** — reporting vulnerabilities + what's in scope. **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
 ## Deployment modes = key providers
 
@@ -159,14 +164,18 @@ for the full schema and the threat model.
 signature over the stored bytes); context-bound KEK (format v2: editing any claim breaks
 the unwrap); machine binding (none / strict / pool); online key provider + reference
 `cryptship-server`; signing-key rotation (key ring); configurable revocation
-(open / closed / grace); the compile/transform seam; loader + container
-hardening; per-license watermarking; and the attested (confidential-compute)
-provider behind `Attester` / `attest.Verifier` interfaces with test-only
-implementations (no production verifier yet).
+(open / closed / grace) with **signed** revocation checks; **live `--revoke-file`
+revocation** (no restart); **online outage grace** (`CRYPTSHIP_ONLINE_GRACE`, a
+machine-sealed cached content key with authenticated validity); the
+compile/transform seam; loader + container hardening; per-license watermarking;
+and the attested (confidential-compute) provider behind `Attester` /
+`attest.Verifier` interfaces with test-only implementations (no production
+verifier yet).
 
-**Roadmap:** a real SEV-SNP/TDX `Attester` + Trustee-style KBS integration,
-TPM-sealed binding, cloud-KMS wrapping, offline grace caching for `online`, and
-chunked AEAD for very large payloads.
+**Roadmap:** a real SEV-SNP/TDX `Attester` + Trustee-style KBS integration (and
+the attested replay fix: server-issued challenge + ephemeral TEE key), TPM-sealed
+binding, cloud-KMS wrapping, seat management, and chunked AEAD for very large
+payloads.
 
 ## Crypto
 
