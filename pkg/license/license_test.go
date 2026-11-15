@@ -1,6 +1,7 @@
 package license
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -165,5 +166,22 @@ func TestValidateSecretVersion(t *testing.T) {
 		Binding: Binding{Policy: BindStrict, SecretVersion: SecretVersion2}}
 	if err := c.Validate(); err == nil {
 		t.Fatal("secret_v accepted on a strict license")
+	}
+}
+
+// Marshal keeps the signed claim bytes, even with '&', '<' or '>' in them.
+func TestMarshalKeepsSignedBytes(t *testing.T) {
+	raw := []byte(`{"claims":{"v":2,"license_id":"l","customer_id":"Smith & Sons <eu>","product":"p","payload_id":"x","issued_at":0,"not_after":0,"binding":{"policy":"none"},"wrapped_keys":null,"signing_key_id":""},"sig_alg":"ed25519","sig":"AA=="}`)
+	lic, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := lic.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Parse(out)
+	if err != nil || !bytes.Equal(again.ClaimsRaw, lic.ClaimsRaw) {
+		t.Fatalf("claims changed: %s", out)
 	}
 }

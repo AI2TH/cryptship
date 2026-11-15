@@ -225,7 +225,20 @@ func (c Claims) Validate() error {
 
 // Marshal serialises a license for storage. It must stay compact: the signature
 // covers ClaimsRaw byte-for-byte, and Sign produces compact bytes.
-func (l *License) Marshal() ([]byte, error) { return json.Marshal(l) }
+//
+// HTML escaping is off: encoding/json would otherwise rewrite '&', '<' and
+// '>' inside the raw claims as \u0026 and so on, changing the signed bytes
+// of a license whose claims contain them literally (found by FuzzParse).
+// Licenses from Sign are unaffected, since their claims are already escaped.
+func (l *License) Marshal() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(l); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
 
 // Parse decodes a license and its claims view.
 func Parse(b []byte) (*License, error) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"testing"
 )
 
@@ -49,8 +50,12 @@ func FuzzParse(f *testing.F) {
 		if err != nil {
 			t.Fatalf("re-parse of marshalled license: %v", err)
 		}
-		if !bytes.Equal(again.ClaimsRaw, lic.ClaimsRaw) || !bytes.Equal(again.Sig, lic.Sig) {
-			t.Fatal("round trip changed the signed bytes")
+		// encoding/json compacts raw claims, so whitespace in hand-written
+		// claims is not preserved; compact claims must survive byte for byte.
+		var compact bytes.Buffer
+		if json.Compact(&compact, lic.ClaimsRaw) == nil && bytes.Equal(compact.Bytes(), lic.ClaimsRaw) &&
+			(!bytes.Equal(again.ClaimsRaw, lic.ClaimsRaw) || !bytes.Equal(again.Sig, lic.Sig)) {
+			t.Fatalf("round trip changed the signed bytes:\n%s\n%s", lic.ClaimsRaw, again.ClaimsRaw)
 		}
 	})
 }
