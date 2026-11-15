@@ -63,8 +63,9 @@ Two checks remain ordinary code in the loader: the **signature** and the
 unwraps on its own machine, so for enforced expiry use the `online` provider.
 The loader also refuses to start when the clock is more than 24 hours behind
 the latest start it recorded for an expiring license (sealed in
-`CRYPTSHIP_STATE_DIR`), but deleting that state resets the check: it stops a
-casual clock rollback, not a determined one. With binding `none`, the license
+`CRYPTSHIP_STATE_DIR` under a key derived from the license's binding material),
+but deleting that state resets the check: it stops a casual clock rollback, not
+a determined one. With binding `none`, the license
 itself carries the key material: treat it like a secret.
 
 ## Quickstart
@@ -107,15 +108,20 @@ acquired**. That is a single pluggable interface (`pkg/keyprovider`):
 |---|---|---|---|
 | **Air-gapped** | `offline` | machine fingerprint, or none | expiry only |
 | **On-prem / cloud** | `online` | per-license secret held by your server | **real** — the server declines |
-| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | planned: interfaces + test-only verifier today |
+| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | protocol built (server challenge, key sealed to an ephemeral TEE key); SEV-SNP/TDX verifiers need hardware, test-only verifier today |
 
 The loader, license format, crypto, and app are identical across all modes — only
 the key provider differs. `offline` (none/strict/pool) and `online` are built and
 tested; `online` uses the reference `cryptship-server` (a stateless key broker).
 `attested` is built behind an `Attester` interface (loader) and an
-`attest.Verifier` interface (server), each with a test-only implementation. There
-is no production verifier yet, so `cryptship-server --require-attestation`
-refuses to start rather than accept evidence it cannot check. Real SEV-SNP/TDX
+`attest.Verifier` interface (server), each with a test-only implementation. The
+protocol is replay-safe: the server issues a single-use challenge, the evidence
+commits to it and to an ephemeral key made inside the TEE, and the secret comes
+back encrypted to that key. Server secrets are derived per binding policy
+(`binding.secret_v` 2), so an `online` server cannot release an `attested`
+secret even with the same master key. There is no production verifier yet, so
+`cryptship-server --require-attestation` refuses to start rather than accept
+evidence it cannot check. Real SEV-SNP/TDX
 quote generation needs confidential-compute hardware (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
 
@@ -135,7 +141,11 @@ source reconstruction:
   with the seccomp profile + non-root + dropped caps + read-only + tmpfs from
   `deploy/`. Stops other non-root users in the container; anything running as
   the app's own uid, container root or host root can still read the decrypted
-  files.
+  files. Optional: `CRYPTSHIP_APP_USER` extracts as a separate owner so the app
+  cannot modify its code, `CRYPTSHIP_EXEC_MEMFD` runs a single binary from
+  memory with no decrypted file on disk, and `pkg/harden` /
+  `helpers/python/cryptship_harden.py` let the app make itself non-dumpable
+  again after exec.
 - **Per-license watermark** — the loader drops `.cryptship-manifest.json` and
   exposes `CRYPTSHIP_LICENSE_ID` / `CRYPTSHIP_CUSTOMER` to the app, so a leaked
   instance traces to its licensee (a deterrent — strippable).
@@ -158,15 +168,23 @@ for the full schema and the threat model.
 **Built & tested:** AES-256-GCM payload encryption; Ed25519 licenses (detached
 signature over the stored bytes); context-bound KEK (format v2: editing any claim breaks
 the unwrap); machine binding (none / strict / pool); online key provider + reference
-`cryptship-server`; signing-key rotation (key ring); configurable revocation
-(open / closed / grace); the compile/transform seam; loader + container
-hardening; per-license watermarking; and the attested (confidential-compute)
-provider behind `Attester` / `attest.Verifier` interfaces with test-only
-implementations (no production verifier yet).
+`cryptship-server` (policy-bound server secrets, live denylist, seat limits,
+sealed outage grace); signing-key rotation (key ring); signed, nonce-bound
+revocation checks with configurable failure policy (open / closed / grace);
+clock and grace state sealed under a binding-derived key; the compile/transform
+seam; loader + container hardening (separate-uid extraction, memfd exec,
+dumpable helpers); per-license watermarking; the attested (confidential-compute)
+protocol behind `Attester` / `attest.Verifier` interfaces with test-only
+implementations (no production verifier yet); and fuzz tests for license
+parsing, extraction and the response decoders.
 
-**Roadmap:** a real SEV-SNP/TDX `Attester` + Trustee-style KBS integration,
-TPM-sealed binding, cloud-KMS wrapping, offline grace caching for `online`, and
-chunked AEAD for very large payloads.
+**Roadmap:** real SEV-SNP/TDX attesters and verifiers, TPM-sealed binding and
+cloud instance identity, cloud-KMS wrapping, server-signed time for offline
+expiry, and chunked AEAD for very large payloads.
+
+## Security
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## Crypto
 

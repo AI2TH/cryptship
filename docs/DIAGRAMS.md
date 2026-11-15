@@ -96,7 +96,7 @@ flowchart TD
   S(["container start"]) --> H["loader: mark non-dumpable"]
   H --> V{"verify license signature<br/>(vendor.pub key ring)"}
   V -- fail --> X1["refuse"]
-  V -- ok --> E{"expiry + revocation"}
+  V -- ok --> E{"expiry"}
   E -- fail --> X2["refuse"]
   E -- ok --> SEL["select provider by binding policy"]
   SEL --> OFF["offline: KEK from fingerprint<br/>or unbound secret"]
@@ -104,24 +104,30 @@ flowchart TD
   OFF --> UNW{"unwrap the wrapped key"}
   NET --> UNW
   UNW -- "wrong key -> AEAD fails" --> X3["refuse"]
-  UNW -- ok --> DEC["decrypt payload into tmpfs"]
+  UNW -- "ok: content key + state key" --> RC{"signed revocation check<br/>+ clock check<br/>(state sealed by state key)"}
+  RC -- fail --> X4["refuse"]
+  RC -- ok --> MODE{"CRYPTSHIP_EXEC_MEMFD?"}
+  MODE -- yes --> MFD["copy one ELF into a sealed memfd"]
+  MODE -- no --> DEC["decrypt payload into tmpfs"]
   DEC --> WM["write watermark manifest"]
-  WM --> EXE["exec app as PID 1"]
+  WM --> OWN["CRYPTSHIP_APP_USER: chown tree,<br/>drop to app uid"]
+  OWN --> EXE["exec app as PID 1"]
+  MFD --> EXE
 ```
 
 ---
 
-## Online / attested sequence
+## Online sequence
 
 ```mermaid
 sequenceDiagram
   participant L as loader (in container)
   participant S as cryptship-server (key broker)
   L->>L: verify license + expiry
-  L->>S: POST /v1/key — license_id, nonce [, attestation]
+  L->>S: POST /v1/key - license_id, nonce, policy, secret_v [, license, machine]
   S->>S: denylist check (revocation)
-  S->>S: attestation check (attested mode only)
-  S->>S: secret = HKDF of master and license_id
+  S->>S: seat check (with --enforce-seats)
+  S->>S: secret = HKDF of master, policy online, license_id
   S-->>L: signed response - secret and not_after, echoes nonce
   L->>L: verify signature and nonce
   L->>L: derive KEK, unwrap content key
@@ -131,6 +137,26 @@ sequenceDiagram
 Revocation is immediate: the server returns `410 Gone` and the app refuses to
 start. The signed, nonce-bound response means a proxy cannot forge or replay a
 "yes".
+
+## Attested sequence
+
+```mermaid
+sequenceDiagram
+  participant L as loader (inside the TEE)
+  participant S as cryptship-server (key broker with a verifier)
+  L->>S: POST /v1/challenge - license_id
+  S-->>L: challenge (single use, MACed, 2 minutes)
+  L->>L: make ephemeral X25519 key pair
+  L->>L: evidence with REPORT_DATA = hash of license_id, challenge, ephemeral public key
+  L->>S: POST /v1/key - challenge, evidence, ephemeral public key
+  S->>S: spend challenge, verify evidence against that hash
+  S->>S: secret = HKDF of master, policy attested, license_id
+  S-->>L: signed response - secret encrypted to the ephemeral key
+  L->>L: decrypt secret, derive KEK, unwrap content key
+```
+
+A replayed request fails (the challenge is spent), and a captured answer cannot
+be opened without the ephemeral private key, which stays in the TEE.
 
 ---
 

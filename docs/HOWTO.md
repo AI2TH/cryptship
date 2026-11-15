@@ -129,8 +129,14 @@ immediate). See §5 for running the server.
 ```bash
 cryptship master-key --out master.key          # the server's master secret (SECRET)
 cryptship issue ... --binding online \
-  --server https://lic.example.com --server-master-key master.key ...
+  --server https://lic.example.com --server-master-key master.key \
+  --max-machines 5 ...                         # optional seat limit (server --enforce-seats)
 ```
+New online/attested licenses carry `binding.secret_v: 2`: the server secret is
+derived per binding policy, so an online server can never release an attested
+license's secret. Loaders from before this field reject such licenses
+(`unknown field "secret_v"`); until they are updated, issue with
+`--server-secret-version 0` (the old derivation).
 
 ### attested — confidential computing
 Like online, but the key broker releases the secret only after verifying TEE
@@ -139,7 +145,11 @@ can't read the memory — **and only when you control the guest** (a locked imag
 it can't root into). Needs CC hardware and a verifier on the server; today the
 loader side is an `Attester` interface and the server side an `attest.Verifier`
 interface, with test-only implementations in `pkg/attest/attesttest` (see
-ARCHITECTURE.md → roadmap).
+ARCHITECTURE.md → roadmap). The wire protocol is done: the loader fetches a
+single-use challenge, the evidence's REPORT_DATA commits to
+`online.AttestationBinding(license_id, challenge, ephemeral public key)`, and the
+server returns the secret encrypted to that ephemeral key, so neither a captured
+request nor a captured answer can be reused.
 ```bash
 cryptship issue ... --binding attested \
   --server https://kbs.example.com --server-master-key master.key ...
@@ -188,6 +198,22 @@ isn't memory-backed. Full docker + Kubernetes settings are in
 [../deploy/README.md](../deploy/README.md). This stops a non-root attacker — not
 host root (that needs the `attested` mode).
 
+Three optional extras (details and a `docker run` recipe in
+[../deploy/README.md](../deploy/README.md)):
+
+- **The app cannot change its own code:** start the loader as root with
+  `CRYPTSHIP_APP_USER=65532:65532`. It extracts, gives the tree to root (or
+  `CRYPTSHIP_EXTRACT_OWNER`) and the app's group (0750/0640), and drops to
+  65532 before exec. It needs `CAP_CHOWN`, `CAP_SETUID` and `CAP_SETGID`.
+- **No decrypted file at all, for a single binary:**
+  `CRYPTSHIP_EXEC_MEMFD=bin/server` runs that ELF entry of the payload from a
+  sealed memfd (`cryptship-loader -- server --flag` sets argv). Scripts and
+  interpreters with many files cannot use this.
+- **Make the app non-dumpable again:** execve resets the loader's
+  `PR_SET_DUMPABLE`. Call `harden.NonDumpable()` (`github.com/AI2TH/cryptship/pkg/harden`)
+  at the top of a Go `main`, or ship `helpers/python/cryptship_harden.py` with a
+  Python app and call `cryptship_harden.set_non_dumpable()` first.
+
 The loader also exposes the license identity to your app for watermarking:
 `CRYPTSHIP_LICENSE_ID`, `CRYPTSHIP_CUSTOMER`, `CRYPTSHIP_PAYLOAD_ID`, and drops a
 `.cryptship-manifest.json` into the extracted tree.
@@ -212,27 +238,42 @@ cryptship-server \
 - `--require-attestation` makes the server refuse to start: no SEV-SNP/TDX
   verifier is built in yet, and accepting evidence it cannot verify would give
   no protection. To use `attested` today, implement `attest.Verifier` (signature
-  chain, `online.AttestationNonce` in REPORT_DATA, measurement allow-list) and set
-  `licenseserver.Server.Verifier`, or front the key broker with a verifier such as
-  Confidential Containers Trustee.
-- The server cannot tell an `attested` license from an `online` one. A server
-  without a verifier releases the secret of an attested license to anyone who
-  asks, so give the attestation server its own master key and never run a
-  non-verifying server with that key.
+  chain, `online.AttestationBinding` in REPORT_DATA, measurement allow-list) and
+  set `licenseserver.Server.Verifier`, or front the key broker with a verifier
+  such as Confidential Containers Trustee.
+- Attested secrets are safe on a non-verifying server for licenses with
+  `binding.secret_v: 2` (the default): their secret is derived per policy and
+  only released through the attested protocol. Licenses issued without it
+  (`--server-secret-version 0`, or before the field existed) use the old
+  derivation, which a non-verifying server *will* release for an attested
+  license. Reissue them, then start the server with `--no-legacy-secrets`; until
+  then, give attested licenses their own master key.
+- Seats: `--enforce-seats` limits each license to its `binding.max` distinct
+  machines (`issue --max-machines N`; 0 = no limit). A machine keeps its seat
+  for `--seat-lease` (default `720h`) after its last start; `--seats-file`
+  persists seats across restarts, and `--license-keys` names the key ring that
+  signs licenses if it is not the `--sign` key. Loaders report their machine
+  fingerprint, so mount `/etc/machine-id`; a modified loader can lie, so treat
+  seats as a limit for honest customers.
 
 A separate revocation check (`revocation_url` in the license) is **signed**: the
 loader sends a nonce and verifies the server's signed answer against the key
-ring, so a captive portal or on-path attacker cannot forge "not revoked".
-`CRYPTSHIP_REVOCATION=closed` additionally rejects any *unsigned* "active" answer.
-The loader's behaviour on a *network failure* is the operator's choice:
-`open` (default — run), `closed` (refuse), `grace:<dur>` (run if the last good
-check is younger than `<dur>`).
+ring, so a captive portal or on-path attacker cannot forge "not revoked" or
+replay an old answer. The loader's behaviour when the check fails is the
+operator's choice:
+`open` (default — run; also accepts an unsigned 200 from a generic endpoint),
+`closed` (refuse unless the server signs "not revoked"), `grace:<dur>` (run if
+the last *signed* "not revoked" is younger than `<dur>`). `closed` and `grace`
+need a revocation endpoint that signs (cryptship-server's `/v1/check`). The
+grace record is sealed, so editing or copying it does not extend grace.
 
 For the **online** binding itself, set `CRYPTSHIP_ONLINE_GRACE=<dur>` (e.g. `12h`)
-to let a cached, machine-sealed secret ride out a license-server **outage** for
-that long. It is off by default (every start needs the server); it never bypasses
-revocation (a reachable server that says revoked still wins) and never applies to
-`attested` (which must always re-attest).
+to let a cached, machine-sealed secret ride out a license-server **outage** (no
+answer, or 502/503/504 from a proxy) for that long. It is off by default (every
+start needs the server); it never bypasses revocation (a reachable server that
+says revoked still wins) and never applies to `attested` (which must always
+re-attest). Anyone who can block the server can use the window, so keep it
+short.
 
 ---
 
@@ -272,6 +313,9 @@ accepts both versions.
 | `CRYPTSHIP_REVOCATION` | `open` | `open` / `closed` / `grace:<dur>` (revocation-URL failure policy) |
 | `CRYPTSHIP_ONLINE_GRACE` | unset | `<dur>` (e.g. `12h`): ride out an online license-server outage using a machine-sealed cached secret; off by default |
 | `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | revocation-grace, online-grace, and clock-rollback state (best effort: if it is not writable those checks degrade with a warning) |
+| `CRYPTSHIP_APP_USER` | unset | `uid[:gid]`: loader starts as root, extracts as another owner, drops to this user before exec (error if not root) |
+| `CRYPTSHIP_EXTRACT_OWNER` | `0` | with `CRYPTSHIP_APP_USER`: owner uid of the extracted tree (must differ from the app uid) |
+| `CRYPTSHIP_EXEC_MEMFD` | unset | `<path in payload>`: run that single ELF binary from a memfd; nothing is extracted |
 
 ### CLI commands
 | Command | Purpose |
@@ -282,7 +326,11 @@ accepts both versions.
 | `cryptship pack` | (optionally compile, then) encrypt an app dir |
 | `cryptship issue` | issue a signed license for a binding mode |
 | `cryptship inspect [--pub ...]` | print claims and verify the signature |
-| `cryptship-server` | reference license / key-broker server |
+| `cryptship-server` | reference license / key-broker server (`--revoke-file`, `--enforce-seats`, `--no-legacy-secrets`) |
+
+`cryptship issue --expires 2027-03-31` ends the license at 00:00:00 UTC on that
+date; add `--expires-end-of-day` to keep it valid through 23:59:59 UTC. `--days N`
+counts from now.
 
 ### Keep secret vs. ship
 - **Secret (never commit / never put in the image):** `vendor.key`, `content.key`,
