@@ -16,9 +16,9 @@ small loader decrypts and runs it only when a valid license is present.
 |---|---|
 | `docker save` + read the source | the image contains only `payload.enc` (AES-256-GCM) |
 | sharing a license across machines | binding wraps the key to a fingerprint / server |
-| running after a license is pulled | `online` mode — the server declines, instantly |
+| running after a license is pulled | `online` mode — the server declines on the next start |
 | a dump yielding clean source | compile before sealing → bytecode / native, not `.py` |
-| a non-root in-container attacker | hardening: non-dumpable, seccomp, non-root, tmpfs |
+| other non-root users in the container | hardening: non-dumpable, seccomp, non-root, tmpfs |
 | an untraceable leak | per-license watermark names the licensee |
 
 **What it does _not_ solve (stated honestly):** code that runs on hardware the
@@ -29,9 +29,11 @@ never ships) truly prevents it. cryptship's goal is to make casual copying
 impossible and serious extraction cost more than a license — and, with
 compilation, to yield compiled artifacts rather than source even when it fails.
 
-The core guarantee: **validity == decryptability.** The content key is *derived*
-from the license and binding material, so there is no "is it valid?" boolean to
-patch — tampering produces a wrong key, and the AEAD simply fails.
+The core guarantee: **binding == decryptability.** The content key is *derived*
+from the license and binding material, so the wrong machine or an edited bound
+claim produces a wrong key, and the AEAD simply fails. The signature and expiry
+checks are enforced by the loader; use `online` when expiry must hold against a
+patched loader.
 
 ---
 
@@ -145,5 +147,6 @@ flowchart TD
 
 The content key encrypts the payload **once per build**; each license wraps that
 same key under a KEK that only reconstitutes with the right binding material. The
-claims context in the KEK means editing any policy claim breaks the unwrap — so
-`validity == decryptability` holds even against a patched loader.
+claims context in the KEK (license and customer id, product, payload id, binding
+policy, issue and expiry dates) means editing any of those breaks the unwrap, even
+against a patched loader. Other claims are protected by the signature alone.
