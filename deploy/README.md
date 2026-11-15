@@ -33,8 +33,10 @@ docker run --rm \
 Run as a non-root user (set `USER` in your image, pass `--user`, and mount the
 tmpfs writable by that uid), so a compromised app user cannot read another
 user's memory. With `--read-only`, the loader cannot persist revocation-grace or
-clock state in `/var/lib/cryptship`; if you use `CRYPTSHIP_REVOCATION=grace:...`,
-mount a small writable volume owned by that uid at `CRYPTSHIP_STATE_DIR`.
+clock-rollback state in `/var/lib/cryptship`: it warns that the clock check is
+disabled, and `CRYPTSHIP_REVOCATION=grace:...` has no record to fall back on. To
+keep them, mount a small writable volume owned by that uid at
+`CRYPTSHIP_STATE_DIR` (e.g. `-v cryptship-state:/var/lib/cryptship`).
 
 ## Kubernetes
 
