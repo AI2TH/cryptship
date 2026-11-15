@@ -38,8 +38,14 @@ func wrapForTest(t *testing.T, c license.Claims, material, contentKey []byte) []
 
 // serverBoundLicense builds a license whose content key is wrapped under the KEK
 // derived from the server-held binding secret (what `cryptship issue --binding
-// online|attested` does).
+// online|attested` does), with secret version 2.
 func serverBoundLicense(t *testing.T, priv ed25519.PrivateKey, master, contentKey []byte, policy license.BindingPolicy, server string) *license.License {
+	t.Helper()
+	return serverBoundLicenseV(t, priv, master, contentKey, policy, server, license.SecretVersion2)
+}
+
+// serverBoundLicenseV is serverBoundLicense with an explicit secret version.
+func serverBoundLicenseV(t *testing.T, priv ed25519.PrivateKey, master, contentKey []byte, policy license.BindingPolicy, server string, secretVersion int) *license.License {
 	t.Helper()
 	now := time.Now().Unix()
 	c := license.Claims{
@@ -51,9 +57,9 @@ func serverBoundLicense(t *testing.T, priv ed25519.PrivateKey, master, contentKe
 		IssuedAt:     now,
 		NotAfter:     now + 3600,
 		SigningKeyID: "v1",
-		Binding:      license.Binding{Policy: policy, Server: server},
+		Binding:      license.Binding{Policy: policy, Server: server, SecretVersion: secretVersion},
 	}
-	secret, err := online.DeriveSecret(master, c.LicenseID)
+	secret, err := online.DeriveSecretFor(master, c.LicenseID, string(policy), secretVersion)
 	if err != nil {
 		t.Fatal(err)
 	}

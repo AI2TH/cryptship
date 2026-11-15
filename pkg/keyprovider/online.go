@@ -73,7 +73,10 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 		return nil, err
 	}
 	m, _ := machine.ID()
-	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{LicenseID: c.LicenseID, Machine: m, Nonce: nonce})
+	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{
+		LicenseID: c.LicenseID, Machine: m, Nonce: nonce,
+		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
+	})
 	if err != nil {
 		// Server unreachable: ride out the outage with a cached secret, if any.
 		var ue *unreachableError
