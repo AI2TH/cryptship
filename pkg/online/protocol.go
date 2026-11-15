@@ -52,6 +52,34 @@ func AttestationNonce(licenseID string, nonce []byte) []byte {
 	return h.Sum(nil)
 }
 
+// CheckResponse is the signed answer to a revocation check (GET /v1/check with a
+// nonce). Signing the answer stops an on-path attacker or captive portal from
+// forging "not revoked": the loader verifies Sig against the vendor key ring and
+// that Nonce echoes the one it sent.
+type CheckResponse struct {
+	LicenseID    string `json:"license_id"`
+	Nonce        []byte `json:"nonce"`
+	Revoked      bool   `json:"revoked"`
+	NotAfter     int64  `json:"not_after"` // how long this answer may be trusted
+	SigningKeyID string `json:"signing_key_id"`
+	Sig          []byte `json:"sig"`
+}
+
+// CheckSigningInput is the fixed byte layout the server signs and the loader
+// verifies for a revocation check.
+func CheckSigningInput(r CheckResponse) []byte {
+	b := []byte("cryptship/revocation-check/v1\x00")
+	b = append(b, r.LicenseID...)
+	b = append(b, 0)
+	b = append(b, r.Nonce...)
+	if r.Revoked {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+	return binary.BigEndian.AppendUint64(b, uint64(r.NotAfter))
+}
+
 // ResponseSigningInput is the fixed byte layout the server signs and the loader
 // verifies.
 func ResponseSigningInput(r KeyResponse) []byte {

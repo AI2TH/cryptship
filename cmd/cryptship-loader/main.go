@@ -8,8 +8,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +31,7 @@ import (
 	"github.com/AI2TH/cryptship/pkg/crypto"
 	"github.com/AI2TH/cryptship/pkg/keyprovider"
 	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 type config struct {
@@ -97,7 +103,7 @@ func run(cfg config) error {
 	if lic.Claims.Expired(time.Now().Unix()) {
 		return fmt.Errorf("license outside validity window (expires %d)", lic.Claims.NotAfter)
 	}
-	if err := enforceRevocation(lic); err != nil {
+	if err := enforceRevocation(lic, ring); err != nil {
 		return err
 	}
 
@@ -263,28 +269,36 @@ func escapeID(licenseID string) string { return url.PathEscape(licenseID) }
 // operator's failure policy (CRYPTSHIP_REVOCATION): "open" (default, run on
 // error), "closed" (refuse on error), "grace:<dur>" (run if a prior successful
 // check is younger than <dur>). Only "closed" is a hard guarantee.
-func enforceRevocation(lic *license.License) error {
+//
+// A cryptship-server signs the check response; the loader verifies it against
+// the vendor key ring, so an on-path attacker or captive portal cannot forge
+// "not revoked". In "closed" mode an UNSIGNED "active" answer is rejected.
+func enforceRevocation(lic *license.License, ring license.KeyRing) error {
 	if lic.Claims.RevocationURL == "" {
 		return nil
 	}
 	mode := env("CRYPTSHIP_REVOCATION", "open")
-	stateFile := stateFile("revocation", lic.Claims.LicenseID)
+	sf := stateFile("revocation", lic.Claims.LicenseID)
 
-	revoked, err := checkRevocation(lic)
-	if err == nil {
-		if revoked {
-			return fmt.Errorf("license %s has been revoked", lic.Claims.LicenseID)
-		}
-		_ = os.MkdirAll(filepath.Dir(stateFile), 0o700)
-		_ = os.WriteFile(stateFile, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600)
+	revoked, signed, err := checkRevocation(lic, ring)
+	if err == nil && revoked {
+		return fmt.Errorf("license %s has been revoked", lic.Claims.LicenseID)
+	}
+	if err == nil && (signed || mode != "closed") {
+		_ = os.MkdirAll(filepath.Dir(sf), 0o700)
+		_ = os.WriteFile(sf, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600)
 		return nil
 	}
+	if err == nil && !signed && mode == "closed" {
+		err = errors.New("revocation response was unsigned; CRYPTSHIP_REVOCATION=closed requires a signing cryptship-server")
+	}
+
 	switch {
 	case mode == "closed":
 		return fmt.Errorf("revocation check failed and CRYPTSHIP_REVOCATION=closed: %w", err)
 	case strings.HasPrefix(mode, "grace:"):
 		if d, perr := time.ParseDuration(strings.TrimPrefix(mode, "grace:")); perr == nil {
-			if b, rerr := os.ReadFile(stateFile); rerr == nil {
+			if b, rerr := os.ReadFile(sf); rerr == nil {
 				// A last-success time in the future (clock set back, or a
 				// hand-edited file) does not count as within grace.
 				if last, lerr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); lerr == nil &&
@@ -302,35 +316,62 @@ func enforceRevocation(lic *license.License) error {
 	}
 }
 
-// checkRevocation returns (revoked, err). 200 = active, 410 = revoked, anything
-// else is an error so the operator's policy decides.
-func checkRevocation(lic *license.License) (bool, error) {
+// checkRevocation returns (revoked, signed, err). It sends a nonce and, if the
+// server returns a signed online.CheckResponse that verifies against the ring
+// and echoes the nonce, trusts its Revoked flag (signed=true). Otherwise it
+// falls back to the legacy status-code reading (200 active / 410 revoked),
+// reported as unsigned.
+func checkRevocation(lic *license.License, ring license.KeyRing) (revoked bool, signed bool, err error) {
 	u, err := url.Parse(lic.Claims.RevocationURL)
 	if err != nil {
-		return false, err
+		return false, false, err
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return false, false, err
 	}
 	q := u.Query()
 	q.Set("license_id", lic.Claims.LicenseID)
+	q.Set("nonce", hex.EncodeToString(nonce))
 	u.RawQuery = q.Encode()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	// Signed path: a valid, nonce-matching CheckResponse is authoritative.
+	var cr online.CheckResponse
+	if json.Unmarshal(body, &cr) == nil && len(cr.Sig) > 0 &&
+		cr.LicenseID == lic.Claims.LicenseID && bytes.Equal(cr.Nonce, nonce) {
+		pub, ok := ring[cr.SigningKeyID]
+		if !ok {
+			pub, ok = ring["*"]
+		}
+		if !ok || len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, online.CheckSigningInput(cr), cr.Sig) {
+			return false, false, errors.New("revocation check: bad response signature")
+		}
+		if cr.NotAfter != 0 && time.Now().Unix() > cr.NotAfter {
+			return false, false, errors.New("revocation check: response expired")
+		}
+		return cr.Revoked, true, nil
+	}
+
+	// Legacy unsigned path.
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return false, nil
+		return false, false, nil
 	case http.StatusGone:
-		return true, nil
+		return true, false, nil
 	default:
-		return false, fmt.Errorf("unexpected status %s", resp.Status)
+		return false, false, fmt.Errorf("unexpected status %s", resp.Status)
 	}
 }

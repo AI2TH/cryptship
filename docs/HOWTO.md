@@ -205,8 +205,10 @@ cryptship-server \
   --master master.key --sign vendor.key --key-id v1 \
   --addr :8080 --ttl 24h
 ```
-- Revoke a license immediately: add `--revoke lic_abc,lic_def` (restart) — bound
-  apps then refuse to start.
+- Revoke a license immediately: add `--revoke lic_abc,lic_def` (static, applied
+  at start), or `--revoke-file deny.txt` for a **live denylist** — one license id
+  per line; edit the file and the next request sees it, **no restart needed**.
+  Bound apps then refuse to start.
 - `--require-attestation` makes the server refuse to start: no SEV-SNP/TDX
   verifier is built in yet, and accepting evidence it cannot verify would give
   no protection. To use `attested` today, implement `attest.Verifier` (signature
@@ -218,9 +220,19 @@ cryptship-server \
   asks, so give the attestation server its own master key and never run a
   non-verifying server with that key.
 
-The loader's revocation behaviour on a *network failure* is the operator's
-choice via `CRYPTSHIP_REVOCATION`: `open` (default — run), `closed` (refuse),
-`grace:<dur>` (run if the last good check is younger than `<dur>`).
+A separate revocation check (`revocation_url` in the license) is **signed**: the
+loader sends a nonce and verifies the server's signed answer against the key
+ring, so a captive portal or on-path attacker cannot forge "not revoked".
+`CRYPTSHIP_REVOCATION=closed` additionally rejects any *unsigned* "active" answer.
+The loader's behaviour on a *network failure* is the operator's choice:
+`open` (default — run), `closed` (refuse), `grace:<dur>` (run if the last good
+check is younger than `<dur>`).
+
+For the **online** binding itself, set `CRYPTSHIP_ONLINE_GRACE=<dur>` (e.g. `12h`)
+to let a cached, machine-sealed secret ride out a license-server **outage** for
+that long. It is off by default (every start needs the server); it never bypasses
+revocation (a reachable server that says revoked still wins) and never applies to
+`attested` (which must always re-attest).
 
 ---
 
@@ -257,8 +269,9 @@ accepts both versions.
 | `CRYPTSHIP_PUBKEY` | `/cryptship/vendor.pub` | public key / ring |
 | `CRYPTSHIP_EXTRACT` | `/run/cryptship/app` | decrypt dir (put on tmpfs) |
 | `CRYPTSHIP_REQUIRE_TMPFS` | unset | `1` = refuse if not tmpfs |
-| `CRYPTSHIP_REVOCATION` | `open` | `open` / `closed` / `grace:<dur>` |
-| `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | revocation-grace and clock-rollback state (best effort: if it is not writable the clock check is skipped with a warning) |
+| `CRYPTSHIP_REVOCATION` | `open` | `open` / `closed` / `grace:<dur>` (revocation-URL failure policy) |
+| `CRYPTSHIP_ONLINE_GRACE` | unset | `<dur>` (e.g. `12h`): ride out an online license-server outage using a machine-sealed cached secret; off by default |
+| `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | revocation-grace, online-grace, and clock-rollback state (best effort: if it is not writable those checks degrade with a warning) |
 
 ### CLI commands
 | Command | Purpose |
