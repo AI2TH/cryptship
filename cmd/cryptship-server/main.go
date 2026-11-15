@@ -2,10 +2,12 @@
 // online and attested binding modes. It derives each per-license secret from a
 // master secret and signs responses with the vendor key.
 //
-// For attested mode, --require-attestation currently accepts any non-empty
-// evidence — a PLACEHOLDER for real SEV-SNP/TDX quote verification, which an
-// integrator plugs in (e.g. by fronting this with Confidential Containers
-// Trustee or calling a verifier such as Veraison/MAA).
+// For attested mode, --require-attestation fails closed: this build has no
+// attestation verifier (SEV-SNP and TDX verification are not implemented yet),
+// so the server refuses to start with the flag rather than release secrets
+// against unverified evidence. An integrator who has a verifier implements
+// attest.Verifier and sets licenseserver.Server.Verifier, or fronts the
+// key broker with one (e.g. Confidential Containers Trustee).
 package main
 
 import (
@@ -19,7 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/licenseserver"
+	"github.com/AI2TH/cryptship/pkg/attest"
+	"github.com/AI2TH/cryptship/pkg/licenseserver"
 )
 
 func main() {
@@ -29,7 +32,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	ttl := flag.Duration("ttl", 24*time.Hour, "validity of each key answer")
 	revoke := flag.String("revoke", "", "comma-separated license ids to deny")
-	requireAtt := flag.Bool("require-attestation", false, "require (placeholder) attestation evidence")
+	requireAtt := flag.Bool("require-attestation", false, "require verified TEE attestation (fails to start: no verifier is built in yet)")
 	flag.Parse()
 
 	master, err := readB64(*masterPath)
@@ -54,20 +57,31 @@ func main() {
 		TTL:     *ttl,
 		Revoked: revoked,
 	}
-	if *requireAtt {
-		srv.Verify = func(evidence []byte) error {
-			if len(evidence) == 0 {
-				return errors.New("missing attestation evidence")
-			}
-			// PLACEHOLDER: verify a real SEV-SNP/TDX quote here.
-			return nil
-		}
-	}
+	verifier, err := attestationVerifier(*requireAtt, builtinVerifier())
+	must(err, "--require-attestation")
+	srv.Verifier = verifier
 
 	fmt.Fprintf(os.Stderr, "cryptship-server listening on %s (attestation required: %v)\n", *addr, *requireAtt)
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		must(err, "serve")
 	}
+}
+
+// builtinVerifier returns the attestation verifier compiled into this server.
+// There is none yet: SEV-SNP and TDX verifiers are planned.
+func builtinVerifier() attest.Verifier { return nil }
+
+// attestationVerifier fails closed: when attestation is required and no
+// verifier is available it returns an error, never a verifier that accepts
+// unverified evidence.
+func attestationVerifier(require bool, v attest.Verifier) (attest.Verifier, error) {
+	if !require {
+		return nil, nil
+	}
+	if v == nil {
+		return nil, fmt.Errorf("%w: this build cannot verify SEV-SNP or TDX evidence, so it refuses to start rather than release secrets to unverified clients", attest.ErrNoVerifier)
+	}
+	return v, nil
 }
 
 func readB64(path string) ([]byte, error) {

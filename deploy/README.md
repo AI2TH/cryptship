@@ -10,8 +10,9 @@ provider or remote execution does.**
 
 ```bash
 docker run --rm \
+  --user 65532:65532 \
   --read-only \
-  --tmpfs /run/cryptship:rw,mode=0700 \
+  --tmpfs /run/cryptship:rw,mode=0700,uid=65532,gid=65532 \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
   --security-opt seccomp=deploy/seccomp.json \
@@ -19,16 +20,23 @@ docker run --rm \
   your-cryptship-image
 ```
 
+- `--user 65532:65532` — run the loader and the app as an unprivileged user,
+  never root (the example Dockerfiles also set `USER 65532:65532`).
 - `--read-only` — root filesystem is immutable; the app may only write to the tmpfs.
-- `--tmpfs /run/cryptship` — decrypted code lives in RAM, never on disk.
+- `--tmpfs /run/cryptship:...,uid=65532,gid=65532` — decrypted code lives in RAM,
+  never on disk, in a directory only that user can enter.
 - `CRYPTSHIP_REQUIRE_TMPFS=1` — the loader refuses to run if the extract dir is not tmpfs.
 - `--cap-drop=ALL` — removes `CAP_SYS_PTRACE` etc.
 - `--security-opt=no-new-privileges` — no privilege escalation via setuid.
 - `seccomp=deploy/seccomp.json` — denies `ptrace`/`process_vm_readv`/`process_vm_writev`/`kcmp` for every process in the container.
 
-Run as a non-root user as well (set `USER` in your image, and mount the tmpfs
-writable by that uid), so a compromised app user cannot read another user's
-memory.
+Run as a non-root user (set `USER` in your image, pass `--user`, and mount the
+tmpfs writable by that uid), so a compromised app user cannot read another
+user's memory. With `--read-only`, the loader cannot persist revocation-grace or
+clock-rollback state in `/var/lib/cryptship`: it warns that the clock check is
+disabled, and `CRYPTSHIP_REVOCATION=grace:...` has no record to fall back on. To
+keep them, mount a small writable volume owned by that uid at
+`CRYPTSHIP_STATE_DIR` (e.g. `-v cryptship-state:/var/lib/cryptship`).
 
 ## Kubernetes
 

@@ -49,29 +49,44 @@ content_key = unwrap(license.wrapped_key, KEK)
 plaintext   = aead_open(payload.enc, content_key)   # wrong key => AEAD tag fails
 ```
 
-Run on an unbound machine, or edit a bound claim (license and customer id,
-product, payload id, binding policy, issue and expiry dates), and the unwrap
-fails. Two checks remain ordinary code in the loader: the **signature** and the
-**expiry** check. Patch those out and an *unedited* expired license still unwraps
-on its own machine, so for enforced expiry use the `online` provider. Claims
-outside the KEK context (edition, entitlements, `revocation_url`) are protected
-only by the signature. With binding `none`, the license itself carries the key
-material: treat it like a secret.
+Run on an unbound machine, or edit a bound claim, and the unwrap fails.
+Licenses issued now are format v2, which binds a hash of **every** claim into
+the KEK (everything except the wrapped keys themselves and, for binding `none`,
+the unbound secret), so removing `revocation_url` or adding an entitlement
+breaks the unwrap even in a loader with the signature check patched out. Older
+v1 licenses still load; their KEK covers only license and customer id, product,
+payload id, binding policy, issue and expiry dates, and their other claims are
+protected only by the signature.
+
+Two checks remain ordinary code in the loader: the **signature** and the
+**expiry** check. Patch those out and an *unedited* expired license still
+unwraps on its own machine, so for enforced expiry use the `online` provider.
+The loader also refuses to start when the clock is more than 24 hours behind
+the latest start it recorded for an expiring license (sealed in
+`CRYPTSHIP_STATE_DIR`), but deleting that state resets the check: it stops a
+casual clock rollback, not a determined one. With binding `none`, the license
+itself carries the key material: treat it like a secret.
 
 ## Quickstart
 
-Requires a working `docker` (e.g. [colima](https://github.com/abiosoft/colima)
-on macOS) and `python3` (used by the demo's tamper step). The tools compile in a
-Go container.
+Requires only a working `docker` (e.g. [colima](https://github.com/abiosoft/colima)
+on macOS). The tools compile in a Go container, and the layer scan and the
+tamper step also run in containers.
 
 ```bash
 bash scripts/demo.sh
 ```
 
+To install the tools directly (Go 1.24 or later):
+
+```bash
+go install github.com/AI2TH/cryptship/cmd/...@latest
+```
+
 The demo packs a tiny Python app, issues a license, builds the image, then
-**`docker save`s it, unpacks it and greps the result** to show the source isn't there,
-runs it to show it decrypts and works, and finally tampers with the license to
-show the loader refuses it.
+**`docker save`s it, unpacks every layer and greps for a marker planted in the
+app's source** to show the source isn't there, runs it to show it decrypts and
+works, and finally tampers with the license to show the loader refuses it.
 
 ## Documentation
 
@@ -92,13 +107,16 @@ acquired**. That is a single pluggable interface (`pkg/keyprovider`):
 |---|---|---|---|
 | **Air-gapped** | `offline` | machine fingerprint, or none | expiry only |
 | **On-prem / cloud** | `online` | per-license secret held by your server | **real** — the server declines |
-| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | planned: interface + mock only today |
+| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | planned: interfaces + test-only verifier today |
 
 The loader, license format, crypto, and app are identical across all modes — only
 the key provider differs. `offline` (none/strict/pool) and `online` are built and
 tested; `online` uses the reference `cryptship-server` (a stateless key broker).
-`attested` is built behind an `Attester` interface with a mock for tests — real
-SEV-SNP/TDX quote generation needs confidential-compute hardware (see
+`attested` is built behind an `Attester` interface (loader) and an
+`attest.Verifier` interface (server), each with a test-only implementation. There
+is no production verifier yet, so `cryptship-server --require-attestation`
+refuses to start rather than accept evidence it cannot check. Real SEV-SNP/TDX
+quote generation needs confidential-compute hardware (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
 
 ## Hardening & anti-extraction
@@ -138,12 +156,13 @@ for the full schema and the threat model.
 ## Status
 
 **Built & tested:** AES-256-GCM payload encryption; Ed25519 licenses (detached
-signature over the stored bytes); context-bound KEK (editing a bound claim breaks
+signature over the stored bytes); context-bound KEK (format v2: editing any claim breaks
 the unwrap); machine binding (none / strict / pool); online key provider + reference
 `cryptship-server`; signing-key rotation (key ring); configurable revocation
 (open / closed / grace); the compile/transform seam; loader + container
 hardening; per-license watermarking; and the attested (confidential-compute)
-provider behind an `Attester` interface with a mock key broker.
+provider behind `Attester` / `attest.Verifier` interfaces with test-only
+implementations (no production verifier yet).
 
 **Roadmap:** a real SEV-SNP/TDX `Attester` + Trustee-style KBS integration,
 TPM-sealed binding, cloud-KMS wrapping, offline grace caching for `online`, and

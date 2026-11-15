@@ -136,8 +136,10 @@ cryptship issue ... --binding online \
 Like online, but the key broker releases the secret only after verifying TEE
 attestation (AMD SEV-SNP / Intel TDX). This is the only mode where host root
 can't read the memory — **and only when you control the guest** (a locked image
-it can't root into). Needs CC hardware; built behind an `Attester` interface with
-a mock for testing (see ARCHITECTURE.md → roadmap).
+it can't root into). Needs CC hardware and a verifier on the server; today the
+loader side is an `Attester` interface and the server side an `attest.Verifier`
+interface, with test-only implementations in `pkg/attest/attesttest` (see
+ARCHITECTURE.md → roadmap).
 ```bash
 cryptship issue ... --binding attested \
   --server https://kbs.example.com --server-master-key master.key ...
@@ -205,9 +207,16 @@ cryptship-server \
 ```
 - Revoke a license immediately: add `--revoke lic_abc,lic_def` (restart) — bound
   apps then refuse to start.
-- `--require-attestation` turns on the (placeholder) attestation check for the
-  `attested` mode; plug a real SEV-SNP/TDX verifier in here (e.g. front it with
-  Confidential Containers Trustee).
+- `--require-attestation` makes the server refuse to start: no SEV-SNP/TDX
+  verifier is built in yet, and accepting evidence it cannot verify would give
+  no protection. To use `attested` today, implement `attest.Verifier` (signature
+  chain, `online.AttestationNonce` in REPORT_DATA, measurement allow-list) and set
+  `licenseserver.Server.Verifier`, or front the key broker with a verifier such as
+  Confidential Containers Trustee.
+- The server cannot tell an `attested` license from an `online` one. A server
+  without a verifier releases the secret of an attested license to anyone who
+  asks, so give the attestation server its own master key and never run a
+  non-verifying server with that key.
 
 The loader's revocation behaviour on a *network failure* is the operator's
 choice via `CRYPTSHIP_REVOCATION`: `open` (default — run), `closed` (refuse),
@@ -229,6 +238,13 @@ Issue new licenses with `--key-id v2`; the loader verifies each license with the
 key named by its `signing_key_id`. A single plain base64 key still works (matches
 any license).
 
+### License format version
+
+`cryptship issue` writes format v2 licenses, which bind every claim into the
+KEK. Loaders from before v2 refuse them with `unsupported version 2`. Until all
+deployed loaders are updated, issue with `--license-version 1`; the new loader
+accepts both versions.
+
 ---
 
 ## 7. Reference
@@ -242,7 +258,7 @@ any license).
 | `CRYPTSHIP_EXTRACT` | `/run/cryptship/app` | decrypt dir (put on tmpfs) |
 | `CRYPTSHIP_REQUIRE_TMPFS` | unset | `1` = refuse if not tmpfs |
 | `CRYPTSHIP_REVOCATION` | `open` | `open` / `closed` / `grace:<dur>` |
-| `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | where grace state is cached |
+| `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | revocation-grace and clock-rollback state (best effort: if it is not writable the clock check is skipped with a warning) |
 
 ### CLI commands
 | Command | Purpose |

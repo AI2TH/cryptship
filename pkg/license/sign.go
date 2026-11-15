@@ -32,11 +32,19 @@ func signingInput(alg string, raw []byte) []byte {
 
 // Sign signs the claims and returns a License whose ClaimsRaw is the exact
 // signed bytes (a detached signature over opaque bytes, JWS-style).
+//
+// Set c.Version before deriving the KEK: the version selects the binding
+// context, so wrapped keys made under one version do not unwrap under another.
+// A zero version is filled in with FormatVersion only for claims that carry
+// no wrapped keys yet.
 func Sign(priv ed25519.PrivateKey, c Claims) (*License, error) {
 	if len(priv) != ed25519.PrivateKeySize {
 		return nil, ErrKeySize
 	}
 	if c.Version == 0 {
+		if len(c.WrappedKeys) != 0 {
+			return nil, errors.New("cryptship/license: claims have wrapped keys but no version; set Version before wrapping")
+		}
 		c.Version = FormatVersion
 	}
 	raw, err := json.Marshal(c)

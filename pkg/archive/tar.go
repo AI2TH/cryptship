@@ -24,7 +24,9 @@ const DefaultMaxExtractBytes int64 = 2 << 30
 
 // TarDir walks root and returns a tar archive of its contents. Regular files,
 // directories, and symlinks are included; modes are preserved. Paths in the
-// archive are relative to root.
+// archive are relative to root. Anything Untar would refuse (other file types,
+// symlinks that leave root) is an error here, at pack time, rather than a
+// loader failure on every customer's machine.
 func TarDir(root string) ([]byte, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -40,29 +42,40 @@ func TarDir(root string) ([]byte, error) {
 		if rel == "." {
 			return nil
 		}
+		name := filepath.ToSlash(rel)
 		var link string
-		if fi.Mode()&os.ModeSymlink != 0 {
+		switch {
+		case fi.Mode().IsRegular(), fi.IsDir():
+		case fi.Mode()&os.ModeSymlink != 0:
 			if link, err = os.Readlink(p); err != nil {
 				return err
 			}
+			if err := checkLinkTarget(name, link); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("archive: %s: unsupported file type %s (only regular files, directories and symlinks)", name, fi.Mode().Type())
 		}
 		hdr, err := tar.FileInfoHeader(fi, link)
 		if err != nil {
 			return err
 		}
-		hdr.Name = filepath.ToSlash(rel)
+		hdr.Name = name
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
 		if fi.Mode().IsRegular() {
+			// Close each file before the next: a deferred Close inside the
+			// walk callback would hold every file open until the walk ends.
 			f, err := os.Open(p)
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-			if _, err := io.Copy(tw, f); err != nil {
-				return err
+			_, err = io.Copy(tw, f)
+			if cerr := f.Close(); err == nil {
+				err = cerr
 			}
+			return err
 		}
 		return nil
 	})
@@ -180,17 +193,16 @@ func mkdirAll(root *os.Root, dir string, perm os.FileMode) error {
 	return nil
 }
 
-// checkLink verifies a symlink entry stays within dest: the target must be
-// relative and lexically contained, and no ancestor of the link may itself be a
-// symlink (so the link cannot be redirected outside the root when created).
+// checkLink verifies a symlink entry stays within dest. The target must be
+// relative, and its ".." components may only come first: they climb through
+// the link's own ancestors, which must be real directories (not symlinks), and
+// may not climb above dest. After the first ordinary component no ".." is
+// allowed, because ".." after a symlink resolves against the symlink's target,
+// not lexically: with s -> ".", "s/.." is the parent of dest. Every link that
+// passes this rule resolves inside dest whatever order the entries come in.
 func checkLink(root *os.Root, name, linkname string) error {
-	ln := filepath.ToSlash(linkname)
-	if ln == "" || path.IsAbs(ln) || filepath.IsAbs(linkname) {
-		return fmt.Errorf("archive: refusing absolute or empty symlink %s -> %q", name, linkname)
-	}
-	resolved := path.Clean(path.Join(path.Dir(name), ln))
-	if resolved == ".." || strings.HasPrefix(resolved, "../") {
-		return fmt.Errorf("archive: refusing symlink escaping dest: %s -> %s", name, linkname)
+	if err := checkLinkTarget(name, linkname); err != nil {
+		return err
 	}
 	for d := path.Dir(name); d != "." && d != "/"; d = path.Dir(d) {
 		fi, err := root.Lstat(d)
@@ -202,6 +214,34 @@ func checkLink(root *os.Root, name, linkname string) error {
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("archive: refusing symlink under symlinked directory: %s", name)
+		}
+	}
+	return nil
+}
+
+// checkLinkTarget is the lexical half of checkLink (see there).
+func checkLinkTarget(name, linkname string) error {
+	ln := filepath.ToSlash(linkname)
+	if ln == "" || path.IsAbs(ln) || filepath.IsAbs(linkname) || strings.ContainsRune(ln, 0) {
+		return fmt.Errorf("archive: refusing absolute or empty symlink %s -> %q", name, linkname)
+	}
+	depth := 0
+	if d := path.Dir(name); d != "." {
+		depth = strings.Count(d, "/") + 1
+	}
+	up, descended := 0, false
+	for _, part := range strings.Split(ln, "/") {
+		switch part {
+		case "", ".":
+		case "..":
+			if descended {
+				return fmt.Errorf("archive: refusing symlink with \"..\" after a path component: %s -> %s", name, linkname)
+			}
+			if up++; up > depth {
+				return fmt.Errorf("archive: refusing symlink escaping dest: %s -> %s", name, linkname)
+			}
+		default:
+			descended = true
 		}
 	}
 	return nil

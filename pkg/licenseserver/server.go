@@ -10,7 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/online"
+	"github.com/AI2TH/cryptship/pkg/attest"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 // Server answers key requests. Master and SignKey are secret; SignKey's public
@@ -21,9 +22,12 @@ type Server struct {
 	KeyID   string             // recorded as signing_key_id
 	TTL     time.Duration      // validity of each answer (default 24h)
 	Revoked map[string]bool    // license_id -> revoked
-	// Verify, when set, must return nil for the request's attestation evidence
-	// before a secret is released (attested mode). Nil = attestation not required.
-	Verify func(evidence []byte) error
+	// Verifier, when set, must accept the request's attestation evidence for
+	// online.AttestationNonce(license_id, nonce) before a secret is released.
+	// Nil means attestation is not required: the server cannot tell an
+	// attested license from an online one, so a server without a Verifier
+	// releases attested-license secrets to anyone who asks.
+	Verifier attest.Verifier
 }
 
 func (s *Server) ttl() time.Duration {
@@ -55,8 +59,8 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "revoked", http.StatusGone)
 		return
 	}
-	if s.Verify != nil {
-		if err := s.Verify(req.Attestation); err != nil {
+	if s.Verifier != nil {
+		if _, err := s.Verifier.Verify(req.Attestation, online.AttestationNonce(req.LicenseID, req.Nonce)); err != nil {
 			http.Error(w, "attestation rejected", http.StatusForbidden)
 			return
 		}
