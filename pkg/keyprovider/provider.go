@@ -28,6 +28,9 @@ var (
 	// ErrDenied means the server refused to release the key for another
 	// reason (403 Forbidden), such as rejected attestation evidence.
 	ErrDenied = errors.New("keyprovider: server refused to release the key (e.g. attestation rejected)")
+	// ErrSeatLimit means the server refused because the license is already
+	// in use on its maximum number of machines (409 Conflict).
+	ErrSeatLimit = errors.New("keyprovider: license seat limit reached")
 )
 
 // Unlocked is what a provider recovers for a license.

@@ -234,6 +234,7 @@ func cmdIssue(args []string) error {
 	revURL := fs.String("revocation-url", "", "optional revocation check URL")
 	out := fs.String("out", "license.json", "output license path")
 	licVersion := fs.Int("license-version", license.FormatVersion, "license format version: 2 binds every claim into the KEK; 1 only for loaders older than v2 support")
+	maxMachines := fs.Int("max-machines", 0, "online/attested: most distinct machines that may use the license at once (enforced by cryptship-server --enforce-seats; 0 = no limit)")
 	secretVersion := fs.Int("server-secret-version", license.SecretVersion2, "online/attested: server secret derivation; 2 binds the policy (an online server cannot release attested secrets), 0 = legacy, for loaders and servers that predate it")
 	var fps stringList
 	fs.Var(&fps, "fingerprint", "bound machine fingerprint (repeatable; strict=1, pool>=1)")
@@ -310,7 +311,14 @@ func cmdIssue(args []string) error {
 	if *secretVersion != license.SecretVersionLegacy && *secretVersion != license.SecretVersion2 {
 		return fmt.Errorf("issue: --server-secret-version must be %d or %d", license.SecretVersionLegacy, license.SecretVersion2)
 	}
-	if err := wrapInto(&claims, license.BindingPolicy(*binding), contentKey, fps, *server, master, *secretVersion); err != nil {
+	if *maxMachines < 0 {
+		return errors.New("issue: --max-machines must be >= 0")
+	}
+	if *maxMachines > 0 && *binding != string(license.BindOnline) && *binding != string(license.BindAttested) {
+		return errors.New("issue: --max-machines applies to online/attested binding (strict/pool are limited by their fingerprints)")
+	}
+	sb := serverBinding{URL: *server, Master: master, SecretVersion: *secretVersion, MaxMachines: *maxMachines}
+	if err := wrapInto(&claims, license.BindingPolicy(*binding), contentKey, fps, sb); err != nil {
 		return err
 	}
 	if err := claims.Validate(); err != nil {
@@ -335,7 +343,15 @@ func cmdIssue(args []string) error {
 	return nil
 }
 
-func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte, fps []string, server string, master []byte, secretVersion int) error {
+// serverBinding is what an online/attested license needs from the issuer.
+type serverBinding struct {
+	URL           string
+	Master        []byte
+	SecretVersion int
+	MaxMachines   int // binding.max: seats, enforced by the server
+}
+
+func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte, fps []string, sb serverBinding) error {
 	switch policy {
 	case license.BindNone:
 		secret, err := crypto.RandomKey()
@@ -361,13 +377,13 @@ func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte
 		return wrapPerFingerprint(c, contentKey, fps)
 
 	case license.BindOnline, license.BindAttested:
-		if server == "" || len(master) == 0 {
+		if sb.URL == "" || len(sb.Master) == 0 {
 			return errors.New("issue: online/attested binding needs --server and --server-master-key")
 		}
-		// secret_v is part of the claims (and of the v2 KEK context), so it
-		// is set before wrapping.
-		c.Binding = license.Binding{Policy: policy, Server: server, SecretVersion: secretVersion}
-		secret, err := online.DeriveSecretFor(master, c.LicenseID, string(policy), secretVersion)
+		// secret_v and max are claims (in the v2 KEK context), so they are
+		// set before wrapping.
+		c.Binding = license.Binding{Policy: policy, Server: sb.URL, SecretVersion: sb.SecretVersion, Max: sb.MaxMachines}
+		secret, err := online.DeriveSecretFor(sb.Master, c.LicenseID, string(policy), sb.SecretVersion)
 		if err != nil {
 			return err
 		}

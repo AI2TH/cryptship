@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -47,6 +48,11 @@ type Server struct {
 	// skips attestation can release an attested license's secret. Set it once
 	// every online/attested license in use carries binding.secret_v 2.
 	NoLegacySecrets bool
+	// Seats, when set, enforces binding.max distinct machines per license.
+	// The loader then has to send its signed license; it is verified against
+	// LicenseKeys (default: the public half of SignKey).
+	Seats       *SeatTracker
+	LicenseKeys license.KeyRing
 
 	mu       sync.Mutex
 	fileSet  map[string]bool
@@ -209,6 +215,10 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "legacy secret derivation refused by this server", http.StatusForbidden)
 		return
 	}
+	if code, err := s.claimSeat(req, license.BindOnline); err != nil {
+		http.Error(w, err.Error(), code)
+		return
+	}
 	secret, err := online.DeriveSecretFor(s.Master, req.LicenseID, string(license.BindOnline), req.SecretVersion)
 	if err != nil {
 		http.Error(w, "unsupported secret version", http.StatusBadRequest)
@@ -251,6 +261,10 @@ func (s *Server) handleAttestedKey(w http.ResponseWriter, req online.KeyRequest)
 		http.Error(w, "legacy secret derivation refused by this server", http.StatusForbidden)
 		return
 	}
+	if code, err := s.claimSeat(req, license.BindAttested); err != nil {
+		http.Error(w, err.Error(), code)
+		return
+	}
 	secret, err := online.DeriveSecretFor(s.Master, req.LicenseID, string(license.BindAttested), req.SecretVersion)
 	if err != nil {
 		http.Error(w, "unsupported secret version", http.StatusBadRequest)
@@ -273,6 +287,36 @@ func (s *Server) handleAttestedKey(w http.ResponseWriter, req online.KeyRequest)
 	resp.Sig = ed25519.Sign(s.SignKey, online.AttestedSigningInput(resp, req.EphemeralPub))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// claimSeat enforces seats when s.Seats is set: it verifies the license the
+// loader sent, checks it is the requested license and policy, and claims a
+// seat for the reported machine. It returns the HTTP status for a refusal.
+func (s *Server) claimSeat(req online.KeyRequest, policy license.BindingPolicy) (int, error) {
+	if s.Seats == nil {
+		return 0, nil
+	}
+	if len(req.License) == 0 {
+		return http.StatusForbidden, errors.New("seat enforcement: the request must carry the signed license")
+	}
+	lic, err := license.Parse(req.License)
+	if err != nil {
+		return http.StatusBadRequest, errors.New("seat enforcement: unreadable license")
+	}
+	keys := s.LicenseKeys
+	if keys == nil {
+		keys = license.KeyRing{"*": s.SignKey.Public().(ed25519.PublicKey)}
+	}
+	if err := lic.VerifyWith(keys); err != nil {
+		return http.StatusForbidden, errors.New("seat enforcement: license signature does not verify")
+	}
+	if lic.Claims.LicenseID != req.LicenseID || lic.Claims.Binding.Policy != policy {
+		return http.StatusForbidden, errors.New("seat enforcement: license does not match the request")
+	}
+	if err := s.Seats.Claim(req.LicenseID, req.Machine, lic.Claims.Binding.Max, time.Now()); err != nil {
+		return http.StatusConflict, err
+	}
+	return 0, nil
 }
 
 func wipe(b []byte) {

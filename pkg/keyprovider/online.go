@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +82,7 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{
 		LicenseID: c.LicenseID, Machine: m, Nonce: nonce,
 		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
+		License: licenseJSON(lic),
 	})
 	if err != nil {
 		// Server unreachable: ride out the outage with a cached secret, if any.
@@ -141,6 +143,12 @@ func postJSON(ctx context.Context, client HTTPClient, c license.Claims, path str
 		return nil, ErrRevoked
 	case http.StatusForbidden:
 		return nil, ErrDenied
+	case http.StatusConflict:
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("%w: %s", ErrSeatLimit, strings.TrimSpace(string(msg)))
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		// A proxy in front of the server reports it down: an outage.
+		return nil, &unreachableError{fmt.Errorf("server returned %s", resp.Status)}
 	default:
 		return nil, fmt.Errorf("online: server returned %s", resp.Status)
 	}
@@ -151,14 +159,34 @@ func postJSON(ctx context.Context, client HTTPClient, c license.Claims, path str
 	return b, nil
 }
 
+// licenseJSON is the signed license as sent for seat enforcement.
+func licenseJSON(lic *license.License) json.RawMessage {
+	if len(lic.ClaimsRaw) == 0 {
+		return nil
+	}
+	b, err := lic.Marshal()
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
 // --- outage grace cache ---
 
-const graceAAD = "cryptship/online-grace/v1"
+// v2: cached_at is authenticated (part of the AAD). A v1 record, whose
+// cached_at could be edited to extend grace, no longer opens.
+const graceAAD = "cryptship/online-grace/v2"
 
 type graceRecord struct {
-	Sealed   []byte `json:"sealed"`    // AES-256-GCM(secret) under the machine KEK
+	Sealed   []byte `json:"sealed"`    // AES-256-GCM(secret) under the machine KEK; AAD binds cached_at
 	CachedAt int64  `json:"cached_at"` // unix seconds
 	NotAfter int64  `json:"not_after"` // server-stated validity (informational)
+}
+
+// graceRecordAAD binds the license id and the cache time into the seal, so
+// editing cached_at (to extend grace) breaks the tag.
+func graceRecordAAD(licenseID string, cachedAt int64) []byte {
+	return []byte(graceAAD + "|" + licenseID + "|" + strconv.FormatInt(cachedAt, 10))
 }
 
 // graceKEK derives the key that seals the cached secret. It binds to the machine
@@ -204,11 +232,12 @@ func graceStore(g *graceConfig, c license.Claims, secret []byte, serverNotAfter 
 		return
 	}
 	defer crypto.Wipe(kek)
-	sealed, err := crypto.Seal(kek, secret, []byte(graceAAD+"|"+c.LicenseID))
+	now := time.Now().Unix()
+	sealed, err := crypto.Seal(kek, secret, graceRecordAAD(c.LicenseID, now))
 	if err != nil {
 		return
 	}
-	rec, err := json.Marshal(graceRecord{Sealed: sealed, CachedAt: time.Now().Unix(), NotAfter: serverNotAfter})
+	rec, err := json.Marshal(graceRecord{Sealed: sealed, CachedAt: now, NotAfter: serverNotAfter})
 	if err != nil {
 		return
 	}
@@ -238,9 +267,9 @@ func graceUnwrap(g *graceConfig, c license.Claims) (Unlocked, error) {
 		return Unlocked{}, err
 	}
 	defer crypto.Wipe(kek)
-	secret, err := crypto.Open(kek, rec.Sealed, []byte(graceAAD+"|"+c.LicenseID))
+	secret, err := crypto.Open(kek, rec.Sealed, graceRecordAAD(c.LicenseID, rec.CachedAt))
 	if err != nil {
-		return Unlocked{}, err
+		return Unlocked{}, errors.New("grace cache: record does not open (edited, or from another machine or license)")
 	}
 	defer crypto.Wipe(secret)
 	return UnwrapKeys(c, secret)

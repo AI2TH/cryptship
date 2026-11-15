@@ -25,7 +25,7 @@ func TestWrapIntoPoolEveryFingerprintUnwraps(t *testing.T) {
 
 	for _, v := range []int{license.FormatVersion1, license.FormatVersion2} {
 		c := license.Claims{Version: v, LicenseID: "lic_pool", CustomerID: "acme", Product: "w", PayloadID: "p", SigningKeyID: "v1"}
-		if err := wrapInto(&c, license.BindPool, contentKey, fps, "", nil, 0); err != nil {
+		if err := wrapInto(&c, license.BindPool, contentKey, fps, serverBinding{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := c.Validate(); err != nil {
@@ -57,7 +57,7 @@ func TestWrapIntoNoneAndOnline(t *testing.T) {
 	master, _ := crypto.RandomKey()
 
 	c := license.Claims{Version: license.FormatVersion, LicenseID: "lic_none", PayloadID: "p"}
-	if err := wrapInto(&c, license.BindNone, contentKey, nil, "", nil, 0); err != nil {
+	if err := wrapInto(&c, license.BindNone, contentKey, nil, serverBinding{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := keyprovider.Unwrap(c, c.UnboundSecret); err != nil || !bytes.Equal(got, contentKey) {
@@ -67,13 +67,13 @@ func TestWrapIntoNoneAndOnline(t *testing.T) {
 	for _, policy := range []license.BindingPolicy{license.BindOnline, license.BindAttested} {
 		for _, sv := range []int{license.SecretVersionLegacy, license.SecretVersion2} {
 			c = license.Claims{Version: license.FormatVersion, LicenseID: "lic_srv", PayloadID: "p"}
-			if err := wrapInto(&c, policy, contentKey, nil, "https://keys.example", master, sv); err != nil {
+			if err := wrapInto(&c, policy, contentKey, nil, serverBinding{URL: "https://keys.example", Master: master, SecretVersion: sv, MaxMachines: 3}); err != nil {
 				t.Fatal(err)
 			}
 			if err := c.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			if c.Binding.SecretVersion != sv {
+			if c.Binding.SecretVersion != sv || c.Binding.Max != 3 {
 				t.Fatalf("%s: secret_v = %d, want %d", policy, c.Binding.SecretVersion, sv)
 			}
 			want, _ := online.DeriveSecretFor(master, "lic_srv", string(policy), sv)
@@ -94,7 +94,7 @@ func TestWrapIntoNoneAndOnline(t *testing.T) {
 		}
 	}
 	c = license.Claims{Version: license.FormatVersion, LicenseID: "lic_x", PayloadID: "p"}
-	if err := wrapInto(&c, license.BindOnline, contentKey, nil, "https://keys.example", master, 7); err == nil {
+	if err := wrapInto(&c, license.BindOnline, contentKey, nil, serverBinding{URL: "https://keys.example", Master: master, SecretVersion: 7}); err == nil {
 		t.Fatal("unknown secret version accepted")
 	}
 }
