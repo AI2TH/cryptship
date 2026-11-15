@@ -3,7 +3,6 @@ package keyprovider
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -120,25 +119,13 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 		return nil, fmt.Errorf("online: server returned %s", resp.Status)
 	}
 
-	var kr online.KeyResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&kr); err != nil {
-		return nil, fmt.Errorf("online: bad response: %w", err)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, online.MaxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("online: read response: %w", err)
 	}
-	pub, ok := keys[kr.SigningKeyID]
-	if !ok {
-		pub, ok = keys["*"]
-	}
-	if !ok {
-		return nil, fmt.Errorf("online: response signed by unknown key %q", kr.SigningKeyID)
-	}
-	if kr.LicenseID != c.LicenseID || !bytes.Equal(kr.Nonce, nonce) || len(kr.Secret) != online.SecretSize {
-		return nil, errors.New("online: response does not match request")
-	}
-	if kr.NotAfter != 0 && time.Now().Unix() > kr.NotAfter {
-		return nil, errors.New("online: response already expired")
-	}
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, online.ResponseSigningInput(kr), kr.Sig) {
-		return nil, errors.New("online: bad response signature")
+	kr, err := online.VerifyKeyResponse(respBody, keys, c.LicenseID, nonce, time.Now())
+	if err != nil {
+		return nil, err
 	}
 	if grace != nil {
 		graceStore(grace, c, kr.Secret, kr.NotAfter) // best effort
