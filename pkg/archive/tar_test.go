@@ -16,7 +16,7 @@ type entry struct {
 	mode       int64
 }
 
-func buildTar(t *testing.T, entries []entry) []byte {
+func buildTar(t testing.TB, entries []entry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
