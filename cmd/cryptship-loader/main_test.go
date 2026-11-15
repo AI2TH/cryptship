@@ -108,15 +108,15 @@ func TestRevocationGraceIgnoresFutureTimestamp(t *testing.T) {
 	}
 
 	write(time.Now().Add(-10 * time.Minute).Unix())
-	if err := enforceRevocation(lic); err != nil {
+	if err := enforceRevocation(lic, license.KeyRing{}); err != nil {
 		t.Fatalf("recent success should be within grace: %v", err)
 	}
 	write(time.Now().Add(-2 * time.Hour).Unix())
-	if err := enforceRevocation(lic); err == nil {
+	if err := enforceRevocation(lic, license.KeyRing{}); err == nil {
 		t.Fatal("old success accepted as within grace")
 	}
 	write(time.Now().Add(365 * 24 * time.Hour).Unix())
-	if err := enforceRevocation(lic); err == nil {
+	if err := enforceRevocation(lic, license.KeyRing{}); err == nil {
 		t.Fatal("future success timestamp accepted as within grace")
 	}
 }
