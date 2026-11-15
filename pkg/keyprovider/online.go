@@ -46,8 +46,9 @@ func (o Online) ContentKey(ctx context.Context, lic *license.License) ([]byte, e
 }
 
 // fetchAndUnwrap runs the request / verify / unwrap flow shared by the online
-// and attested providers. attestation is nil for online.
-func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, attestation []byte) ([]byte, error) {
+// and attested providers. evidence is nil for online; for attested it returns
+// evidence bound to the request nonce.
+func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, evidence func(nonce []byte) ([]byte, error)) ([]byte, error) {
 	c := lic.Claims
 	if c.Binding.Server == "" {
 		return nil, errors.New("online: license has no binding.server")
@@ -59,8 +60,18 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
+	var attestation []byte
+	if evidence != nil {
+		var err error
+		if attestation, err = evidence(nonce); err != nil {
+			return nil, err
+		}
+	}
 	m, _ := machine.ID()
-	body, _ := json.Marshal(online.KeyRequest{LicenseID: c.LicenseID, Machine: m, Nonce: nonce, Attestation: attestation})
+	body, err := json.Marshal(online.KeyRequest{LicenseID: c.LicenseID, Machine: m, Nonce: nonce, Attestation: attestation})
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.Binding.Server, "/")+"/v1/key", bytes.NewReader(body))
 	if err != nil {
 		return nil, err

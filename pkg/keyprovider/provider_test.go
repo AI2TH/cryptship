@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AI2TH/cryptship/pkg/attest/attesttest"
 	"github.com/AI2TH/cryptship/pkg/crypto"
 	"github.com/AI2TH/cryptship/pkg/license"
 	"github.com/AI2TH/cryptship/pkg/licenseserver"
@@ -124,12 +125,7 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 
 	srv := &licenseserver.Server{
 		Master: master, SignKey: priv, KeyID: "v1", Revoked: map[string]bool{},
-		Verify: func(e []byte) error {
-			if len(e) == 0 {
-				return errors.New("no evidence")
-			}
-			return nil
-		},
+		Verifier: attesttest.Verifier{},
 	}
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -137,8 +133,8 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 	lic := serverBoundLicense(t, priv, master, contentKey, license.BindAttested, ts.URL)
 	ring := license.KeyRing{"v1": pub}
 
-	// Mock attester -> KBS accepts and returns the secret.
-	got, err := (Attested{Keys: ring, Client: ts.Client(), Attester: MockAttester{}}).ContentKey(context.Background(), lic)
+	// Test attester -> KBS accepts and returns the secret.
+	got, err := (Attested{Keys: ring, Client: ts.Client(), Attester: attesttest.Attester{}}).ContentKey(context.Background(), lic)
 	if err != nil {
 		t.Fatalf("attested ContentKey: %v", err)
 	}
@@ -150,4 +146,20 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: DefaultAttester()}).ContentKey(context.Background(), lic); !errors.Is(err, ErrNoTEE) {
 		t.Fatalf("no-TEE: err = %v, want ErrNoTEE", err)
 	}
+
+	// Evidence that is not bound to this request's nonce (e.g. replayed from
+	// an earlier request) is refused by the server.
+	stale := staleAttester{bindData: online.AttestationNonce(lic.Claims.LicenseID, []byte("an-older-nonce!!"))}
+	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: stale}).ContentKey(context.Background(), lic); err == nil {
+		t.Fatal("evidence for another nonce was accepted")
+	}
+}
+
+// staleAttester returns test evidence for a fixed bindData, ignoring the
+// request's.
+type staleAttester struct{ bindData []byte }
+
+func (staleAttester) Name() string { return "stale" }
+func (s staleAttester) Evidence(ctx context.Context, _ []byte) ([]byte, error) {
+	return attesttest.Attester{}.Evidence(ctx, s.bindData)
 }

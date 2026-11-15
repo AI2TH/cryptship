@@ -32,7 +32,8 @@ pkg/crypto      AES-256-GCM (Seal/Open), HKDF-SHA256 KEK derivation, key wrap
 pkg/license     signed claims + Ed25519 sign/verify, canonical encoding
 pkg/machine     software machine fingerprint (stable host identifiers -> hash)
 pkg/archive     tar pack + traversal-safe untar
-pkg/keyprovider Provider interface; `offline`, `online` and `attested` (mock attester) providers
+pkg/keyprovider Provider interface; `offline`, `online` and `attested` providers
+pkg/attest      attestation Verifier interface; attesttest = test-only attester/verifier
 pkg/online, pkg/licenseserver  online key protocol and the reference key server
 cmd/cryptship   vendor CLI: keygen, master-key, fingerprint, pack, issue, inspect
 cmd/cryptship-loader  image ENTRYPOINT: verify -> get key -> decrypt -> exec
@@ -137,7 +138,8 @@ image  ──> loader + payload.enc + license.json + vendor.pub   (no source, no
                 unwrap one of wrapped_keys                -> fail closed on no match
       online:   fetch the per-license binding secret from the key server
                 (signed, nonce-bound reply)                -> fail closed if unreachable
-      attested: attester evidence gates the key (mock only today)
+      attested: verified attester evidence gates the key (no production
+                verifier yet; the server refuses --require-attestation)
 6. OpenPayload(content_key, payload.enc, payload_id)      -> AEAD; fail closed
 7. untar into CRYPTSHIP_EXTRACT (should be tmpfs)
 8. exec the app (args after `--`), app becomes PID 1
@@ -166,8 +168,16 @@ Runtime config (env): `CRYPTSHIP_LICENSE`, `CRYPTSHIP_PAYLOAD`,
 - **attested** — like online, but the key broker releases the secret only after
   verifying TEE attestation evidence the loader attaches (via an `Attester`).
   Defends against host root **when the guest is vendor-controlled**; needs
-  confidential-compute hardware. Built behind an interface with a mock; a real
-  SEV-SNP/TDX attester + verifying KBS is the roadmap item.
+  confidential-compute hardware. The evidence must commit to
+  `online.AttestationNonce(license_id, nonce)`, so it cannot be reused for another
+  request nonce or license. Built behind the `Attester` (loader) and
+  `attest.Verifier` (server) interfaces, with test-only implementations; a real
+  SEV-SNP/TDX attester and verifier are the roadmap item. Until then
+  `cryptship-server --require-attestation` refuses to start. Known gap: the nonce
+  is chosen by the loader, not the server, and the secret is not encrypted to a
+  key held in the TEE, so a captured request with genuine evidence can be
+  replayed. A real deployment needs a server challenge and an ephemeral TEE key
+  in REPORT_DATA (as Trustee does).
 
 The software fingerprint (`pkg/machine`) derives one independent fingerprint per
 readable host identifier (`/etc/machine-id`, DMI UUID/serial); the loader tries
