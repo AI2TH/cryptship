@@ -41,7 +41,11 @@ func Select(lic *license.License, providers ...Provider) (Provider, error) {
 // tries every wrapped key until one authenticates. A returned key is genuine
 // (a wrong KEK fails the AEAD tag).
 func Unwrap(c license.Claims, material []byte) ([]byte, error) {
-	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), c.BindingContext())
+	bctx, err := c.BindingContext()
+	if err != nil {
+		return nil, err
+	}
+	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), bctx)
 	if err != nil {
 		return nil, err
 	}

@@ -44,7 +44,8 @@ cmd/cryptship-server  reference key server for the `online` provider
 ```
 vendor Ed25519 signing key  (secret, vendor-only)  -> signs licenses
 content key (random, per build)                     -> encrypts payload.enc
-KEK = HKDF(binding_material, salt = license_id)     -> wraps the content key
+KEK = HKDF(binding_material, salt = license_id,
+           info = SHA-256(binding context))         -> wraps the content key
    binding_material = machine fingerprint   (strict / pool)
                     = per-license secret     (none)
 ```
@@ -58,6 +59,29 @@ KEK = HKDF(binding_material, salt = license_id)     -> wraps the content key
   or an edited bound claim ⇒ AEAD tag failure ⇒ no plaintext. The signature and
   expiry are separate loader checks; `online` enforces expiry server-side.
 
+### Binding context (`claims.v`)
+
+The license version selects which claims the KEK is bound to. Any other value
+of `v` is refused; there is no fallback.
+
+| `v` | Context | Bound claims |
+|---|---|---|
+| 1 | `cryptship/kek-ctx/v1` NUL, then version, license id, customer id, product, payload id and policy (each NUL-terminated), issued_at and not_after (big-endian uint64) | that subset only; the rest is protected by the signature alone |
+| 2 (default) | `cryptship/kek-ctx/v2` NUL, then SHA-256 of the canonical claims | every claim except `wrapped_keys` and `unbound_secret` |
+
+The canonical claims for v2 are the Go `encoding/json` encoding of
+`license.Claims` (fields in declaration order) with `wrapped_keys` set to `null`
+and `unbound_secret` omitted. The loader recomputes it from the parsed claims,
+so editing `edition`, `entitlements`, `revocation_url`, `binding.server`,
+`binding.max`, `binding.fingerprint_hashes`, `signing_key_id`, or `v` itself
+breaks the unwrap. A golden vector in `pkg/license/context_test.go` locks the
+encoding. Because `v` is inside both contexts, rewriting a v2 license as v1
+(a downgrade to the weaker context) also fails the unwrap.
+
+`cryptship issue` writes v2 unless `--license-version 1` is given. Loaders built
+before v2 reject v2 licenses (`unsupported version`), so keep issuing v1 until
+every deployed loader is updated.
+
 ## License format
 
 Signed claims (`pkg/license.Claims`), canonically JSON-encoded, plus a detached
@@ -66,7 +90,7 @@ Ed25519 signature:
 ```jsonc
 {
   "claims": {
-    "v": 1,
+    "v": 2,                            // selects the KEK binding context
     "license_id": "lic_ab12cd34",
     "customer_id": "acme-corp",
     "product": "widget-server",
@@ -86,7 +110,9 @@ Ed25519 signature:
 }
 ```
 
-Field order in `Claims` is the canonical signing order and is append-only.
+Field order in `Claims` is the canonical signing order and is append-only. A
+field added later must be `omitempty`, or the v2 context of every existing
+license changes and none of them unwrap.
 
 ## Build-time flow (vendor)
 

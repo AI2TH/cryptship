@@ -49,13 +49,17 @@ content_key = unwrap(license.wrapped_key, KEK)
 plaintext   = aead_open(payload.enc, content_key)   # wrong key => AEAD tag fails
 ```
 
-Run on an unbound machine, or edit a bound claim (license and customer id,
-product, payload id, binding policy, issue and expiry dates), and the unwrap
-fails. Two checks remain ordinary code in the loader: the **signature** and the
-**expiry** check. Patch those out and an *unedited* expired license still unwraps
-on its own machine, so for enforced expiry use the `online` provider. Claims
-outside the KEK context (edition, entitlements, `revocation_url`) are protected
-only by the signature. With binding `none`, the license itself carries the key
+Run on an unbound machine, or edit any claim, and the unwrap fails. Licenses
+issued now are format v2, which binds a hash of **every** claim into the KEK
+(everything except the wrapped keys themselves and, for binding `none`, the
+unbound secret), so removing `revocation_url` or adding an entitlement breaks
+the unwrap even in a loader with the signature check patched out. Older v1
+licenses still load; their KEK covers only license and customer id, product,
+payload id, binding policy, issue and expiry dates, and their other claims are
+protected only by the signature. Two checks remain ordinary code in the loader:
+the **signature** and the **expiry** check. Patch those out and an *unedited*
+expired license still unwraps on its own machine, so for enforced expiry use the
+`online` provider. With binding `none`, the license itself carries the key
 material: treat it like a secret.
 
 ## Quickstart
@@ -144,7 +148,7 @@ for the full schema and the threat model.
 ## Status
 
 **Built & tested:** AES-256-GCM payload encryption; Ed25519 licenses (detached
-signature over the stored bytes); context-bound KEK (editing a bound claim breaks
+signature over the stored bytes); context-bound KEK (format v2: editing any claim breaks
 the unwrap); machine binding (none / strict / pool); online key provider + reference
 `cryptship-server`; signing-key rotation (key ring); configurable revocation
 (open / closed / grace); the compile/transform seam; loader + container

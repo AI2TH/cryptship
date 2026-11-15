@@ -229,6 +229,13 @@ Issue new licenses with `--key-id v2`; the loader verifies each license with the
 key named by its `signing_key_id`. A single plain base64 key still works (matches
 any license).
 
+### License format version
+
+`cryptship issue` writes format v2 licenses, which bind every claim into the
+KEK. Loaders from before v2 refuse them with `unsupported version 2`. Until all
+deployed loaders are updated, issue with `--license-version 1`; the new loader
+accepts both versions.
+
 ---
 
 ## 7. Reference

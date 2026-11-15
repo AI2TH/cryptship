@@ -16,6 +16,25 @@ import (
 	"github.com/AI2TH/cryptship/pkg/online"
 )
 
+// wrapForTest wraps contentKey under the KEK for claims c (all claims final)
+// and binding material, as `cryptship issue` does.
+func wrapForTest(t *testing.T, c license.Claims, material, contentKey []byte) []byte {
+	t.Helper()
+	bctx, err := c.BindingContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), bctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wk, err := crypto.WrapKey(kek, contentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wk
+}
+
 // serverBoundLicense builds a license whose content key is wrapped under the KEK
 // derived from the server-held binding secret (what `cryptship issue --binding
 // online|attested` does).
@@ -37,15 +56,7 @@ func serverBoundLicense(t *testing.T, priv ed25519.PrivateKey, master, contentKe
 	if err != nil {
 		t.Fatal(err)
 	}
-	kek, err := crypto.DeriveKEK(secret, []byte(c.LicenseID), c.BindingContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	wk, err := crypto.WrapKey(kek, contentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.WrappedKeys = [][]byte{wk}
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, secret, contentKey)}
 	lic, err := license.Sign(priv, c)
 	if err != nil {
 		t.Fatal(err)
@@ -62,9 +73,7 @@ func TestOfflineNoneRoundTrip(t *testing.T) {
 		IssuedAt: now, NotAfter: now + 3600,
 		Binding: license.Binding{Policy: license.BindNone}, UnboundSecret: secret,
 	}
-	kek, _ := crypto.DeriveKEK(secret, []byte(c.LicenseID), c.BindingContext())
-	wk, _ := crypto.WrapKey(kek, contentKey)
-	c.WrappedKeys = [][]byte{wk}
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, secret, contentKey)}
 
 	got, err := Offline{}.ContentKey(context.Background(), &license.License{Claims: c})
 	if err != nil {
