@@ -7,6 +7,7 @@ package licenseserver
 import (
 	"bufio"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -31,17 +32,60 @@ type Server struct {
 	// (one license id per line; blank lines and # comments ignored). Editing it
 	// revokes or restores a license WITHOUT restarting the server.
 	RevokedFile string
-	// Verifier, when set, must accept the request's attestation evidence for
-	// online.AttestationNonce(license_id, nonce) before a secret is released.
-	// Nil means attestation is not required: the server cannot tell an attested
-	// license from an online one, so a server without a Verifier releases
-	// attested-license secrets to anyone who asks.
+	// Verifier, when set, enables the attested protocol: the request must
+	// carry a challenge from /v1/challenge, an ephemeral key, and evidence the
+	// Verifier accepts for online.AttestationBinding(license_id, challenge,
+	// ephemeral key); the secret is returned encrypted to that key. A server
+	// with a Verifier refuses plain (unattested) requests. Nil means the
+	// attested protocol is unavailable.
 	Verifier attest.Verifier
+	// ChallengeTTL is how long a challenge stays valid (default 2 minutes).
+	ChallengeTTL time.Duration
 
 	mu       sync.Mutex
 	fileSet  map[string]bool
 	fileMod  time.Time
 	fileSize int64
+
+	chalMu sync.Mutex
+	spent  map[[32]byte]int64 // challenge hash -> expiry (unix), for single use
+}
+
+func (s *Server) challengeTTL() time.Duration {
+	if s.ChallengeTTL == 0 {
+		return 2 * time.Minute
+	}
+	return s.ChallengeTTL
+}
+
+// spendChallenge checks a challenge and marks it used. Each challenge is
+// accepted at most once while this process runs; its expiry bounds reuse
+// across a restart.
+func (s *Server) spendChallenge(licenseID string, challenge []byte) error {
+	key, err := online.ChallengeKey(s.Master)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if err := online.CheckChallenge(key, licenseID, challenge, now); err != nil {
+		return err
+	}
+	h := sha256.Sum256(challenge)
+	s.chalMu.Lock()
+	defer s.chalMu.Unlock()
+	if s.spent == nil {
+		s.spent = map[[32]byte]int64{}
+	}
+	for k, exp := range s.spent {
+		if exp < now.Unix() {
+			delete(s.spent, k)
+		}
+	}
+	if _, used := s.spent[h]; used {
+		return online.ErrBadChallenge
+	}
+	s.spent[h] = now.Add(s.challengeTTL()).Unix() + 1
+	return nil
 }
 
 func (s *Server) ttl() time.Duration {
@@ -85,12 +129,47 @@ func (s *Server) isRevoked(id string) bool {
 	return s.fileSet[id]
 }
 
-// Handler exposes POST /v1/key and GET /v1/check.
+// Handler exposes POST /v1/key, POST /v1/challenge and GET /v1/check.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/key", s.handleKey)
+	mux.HandleFunc("/v1/challenge", s.handleChallenge)
 	mux.HandleFunc("/v1/check", s.handleCheck)
 	return mux
+}
+
+// handleChallenge issues a single-use challenge for the attested protocol.
+func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req online.ChallengeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || req.LicenseID == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.Verifier == nil {
+		http.Error(w, "attestation not supported by this server", http.StatusForbidden)
+		return
+	}
+	if s.isRevoked(req.LicenseID) {
+		http.Error(w, "revoked", http.StatusGone)
+		return
+	}
+	key, err := online.ChallengeKey(s.Master)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	notAfter := time.Now().Add(s.challengeTTL())
+	ch, err := online.NewChallenge(key, req.LicenseID, notAfter)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(online.ChallengeResponse{Challenge: ch, NotAfter: notAfter.Unix()})
 }
 
 func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
@@ -107,17 +186,22 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "revoked", http.StatusGone)
 		return
 	}
+	if len(req.EphemeralPub) != 0 {
+		s.handleAttestedKey(w, req)
+		return
+	}
 	if s.Verifier != nil {
-		if _, err := s.Verifier.Verify(req.Attestation, online.AttestationNonce(req.LicenseID, req.Nonce)); err != nil {
-			http.Error(w, "attestation rejected", http.StatusForbidden)
-			return
-		}
+		// A server that verifies attestation serves only the attested
+		// protocol: a plain request carries no evidence bound to a challenge.
+		http.Error(w, "attestation required", http.StatusForbidden)
+		return
 	}
 	secret, err := online.DeriveSecret(s.Master, req.LicenseID)
 	if err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
+	defer wipe(secret)
 	resp := online.KeyResponse{
 		LicenseID:    req.LicenseID,
 		Nonce:        req.Nonce,
@@ -128,6 +212,56 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 	resp.Sig = ed25519.Sign(s.SignKey, online.ResponseSigningInput(resp))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleAttestedKey serves the attested protocol: spend the challenge, verify
+// the evidence against the challenge and ephemeral key, and return the secret
+// encrypted to that key.
+func (s *Server) handleAttestedKey(w http.ResponseWriter, req online.KeyRequest) {
+	if s.Verifier == nil {
+		http.Error(w, "attestation not supported by this server", http.StatusForbidden)
+		return
+	}
+	if len(req.EphemeralPub) != online.EphemeralKeySize {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.spendChallenge(req.LicenseID, req.Nonce); err != nil {
+		http.Error(w, "invalid or spent challenge", http.StatusForbidden)
+		return
+	}
+	if _, err := s.Verifier.Verify(req.Attestation, online.AttestationBinding(req.LicenseID, req.Nonce, req.EphemeralPub)); err != nil {
+		http.Error(w, "attestation rejected", http.StatusForbidden)
+		return
+	}
+	secret, err := online.DeriveSecret(s.Master, req.LicenseID)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer wipe(secret)
+	serverPub, sealed, err := online.SealToEphemeral(req.EphemeralPub, req.LicenseID, req.Nonce, secret)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	resp := online.KeyResponse{
+		LicenseID:    req.LicenseID,
+		Nonce:        req.Nonce,
+		NotAfter:     time.Now().Add(s.ttl()).Unix(),
+		SigningKeyID: s.KeyID,
+		ServerPub:    serverPub,
+		SealedSecret: sealed,
+	}
+	resp.Sig = ed25519.Sign(s.SignKey, online.AttestedSigningInput(resp, req.EphemeralPub))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func wipe(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 // handleCheck answers a revocation check. With a ?nonce= it returns a SIGNED
