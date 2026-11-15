@@ -64,9 +64,9 @@ material: treat it like a secret.
 
 ## Quickstart
 
-Requires a working `docker` (e.g. [colima](https://github.com/abiosoft/colima)
-on macOS) and `python3` (used by the demo's tamper step). The tools compile in a
-Go container.
+Requires only a working `docker` (e.g. [colima](https://github.com/abiosoft/colima)
+on macOS). The tools compile in a Go container, and the layer scan and the
+tamper step also run in containers.
 
 ```bash
 bash scripts/demo.sh
@@ -79,7 +79,8 @@ go install github.com/AI2TH/cryptship/cmd/...@latest
 ```
 
 The demo packs a tiny Python app, issues a license, builds the image, then
-**`docker save`s it, unpacks it and greps the result** to show the source isn't there,
+**`docker save`s it, unpacks every layer and greps for a marker planted in the
+app's source** to show the source isn't there,
 runs it to show it decrypts and works, and finally tampers with the license to
 show the loader refuses it.
 
