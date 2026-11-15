@@ -229,8 +229,14 @@ remote execution.
   (static) or `--revoke-file` (a live denylist re-read per request — no restart);
   running instances keep running. By default an online-bound app does not start
   while the server is unreachable; `CRYPTSHIP_ONLINE_GRACE=<dur>` lets it ride out
-  an outage using a machine-sealed cached secret for that long (a reachable
-  server that says revoked still wins).
+  an outage for that long. The cache holds the **content key** (not the
+  per-license secret), sealed to a machine/state-dir key, with `cached_at` and
+  the server's `not_after` **authenticated** (editing them to widen the window
+  fails the open) and both enforced; a reachable server that says revoked still
+  wins. **Trade-off (honest):** on a host the licensee controls, enabling grace
+  writes a sealed content key to disk, so for the window it is extractable much
+  like the running process already is — use it where availability matters more
+  than instant offline revocation, or on hosts you trust. Off by default.
 - **Signed `revocation_url` check:** the loader sends a nonce and verifies the
   server's signed answer against the key ring, so an on-path attacker or captive
   portal cannot forge "not revoked"; `CRYPTSHIP_REVOCATION=closed` also rejects

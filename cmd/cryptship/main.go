@@ -190,7 +190,10 @@ func cmdPack(args []string) error {
 	if err != nil {
 		return err
 	}
-	payloadID := randHex(16)
+	payloadID, err := randHex(16)
+	if err != nil {
+		return err
+	}
 	blob, err := crypto.SealPayload(contentKey, tarBytes, payloadID)
 	if err != nil {
 		return err
@@ -273,7 +276,11 @@ func cmdIssue(args []string) error {
 
 	lid := *licID
 	if lid == "" {
-		lid = "lic_" + randHex(8)
+		h, err := randHex(8)
+		if err != nil {
+			return err
+		}
+		lid = "lic_" + h
 	}
 	notAfter, err := resolveExpiry(*expires, *days)
 	if err != nil {
@@ -490,10 +497,12 @@ func tsStr(u int64) string {
 	return time.Unix(u, 0).UTC().Format(time.RFC3339)
 }
 
-func randHex(n int) string {
+func randHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func writeB64(path string, data []byte, mode os.FileMode) error {

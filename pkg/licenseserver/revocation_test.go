@@ -64,6 +64,40 @@ func TestRevokedFileLiveReload(t *testing.T) {
 	}
 }
 
+// TestRevokedFileSameLengthSwap: a same-byte-length edit to the denylist is seen
+// (the file is re-read every request, so no mtime/size staleness).
+func TestRevokedFileSameLengthSwap(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.RevokedFile = filepath.Join(t.TempDir(), "deny.txt")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	post := func(id string) int {
+		resp, err := http.Post(ts.URL+"/v1/key", "application/json",
+			strings.NewReader(`{"license_id":"`+id+`","nonce":"AAAAAAAAAAAAAAAAAAAAAA=="}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if err := os.WriteFile(srv.RevokedFile, []byte("lic_aaaaaaaa\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if post("lic_aaaaaaaa") != http.StatusGone {
+		t.Fatal("A should be revoked")
+	}
+	// Same byte length (13 bytes) — must still be observed.
+	if err := os.WriteFile(srv.RevokedFile, []byte("lic_bbbbbbbb\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if post("lic_aaaaaaaa") != http.StatusOK {
+		t.Fatal("A should be active after the swap")
+	}
+	if post("lic_bbbbbbbb") != http.StatusGone {
+		t.Fatal("B should be revoked after the swap")
+	}
+}
+
 // TestSignedCheckResponse: /v1/check with a nonce returns a signed answer whose
 // Revoked flag the loader can trust.
 func TestSignedCheckResponse(t *testing.T) {
