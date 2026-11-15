@@ -114,20 +114,27 @@ func run(cfg config) error {
 	if err != nil {
 		return err
 	}
-	contentKey, err := provider.ContentKey(context.Background(), lic)
+	keys, err := keyprovider.Unlock(context.Background(), provider, lic)
 	if err != nil {
 		return fmt.Errorf("key acquisition (%s): %w", provider.Name(), err)
 	}
-	defer crypto.Wipe(contentKey)
+	defer keys.Wipe()
+	contentKey := keys.ContentKey
+	// Local state is sealed under the binding-derived state key. A
+	// third-party provider without one falls back to the content key.
+	stateKey := keys.StateKey
+	if stateKey == nil {
+		stateKey = contentKey
+	}
 
 	// 3a. Optional revocation check. It runs after key acquisition so the
 	// grace record can be sealed under a key only this license unlocks.
-	if err := enforceRevocation(lic, ring, contentKey); err != nil {
+	if err := enforceRevocation(lic, ring, stateKey); err != nil {
 		return err
 	}
 
 	// 3b. Refuse a clock set back to keep an expiring license alive.
-	if err := checkClock(stateDir(), lic.Claims, contentKey, time.Now()); err != nil {
+	if err := checkClock(stateDir(), lic.Claims, stateKey, contentKey, time.Now()); err != nil {
 		return err
 	}
 

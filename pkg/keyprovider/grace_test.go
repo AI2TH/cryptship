@@ -82,3 +82,32 @@ func TestOnlineGraceExpires(t *testing.T) {
 		t.Fatal("stale cache should not satisfy an outage")
 	}
 }
+
+// A start served from the grace cache gets the same state key as a normal
+// start, so the loader's sealed clock and revocation records stay readable.
+func TestOnlineGraceKeepsStateKey(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	master := make([]byte, 32)
+	if _, err := rand.Read(master); err != nil {
+		t.Fatal(err)
+	}
+	contentKey, _ := crypto.RandomKey()
+	ts := httptest.NewServer((&licenseserver.Server{Master: master, SignKey: priv, KeyID: "v1"}).Handler())
+	lic := serverBoundLicense(t, priv, master, contentKey, license.BindOnline, ts.URL)
+	o := Online{Keys: license.KeyRing{"v1": pub}, Client: ts.Client(), CacheDir: t.TempDir(), Grace: time.Hour}
+	live, err := o.Unlock(context.Background(), lic)
+	if err != nil || len(live.StateKey) != 32 {
+		t.Fatalf("live: %v", err)
+	}
+	ts.Close()
+	cached, err := o.Unlock(context.Background(), lic)
+	if err != nil {
+		t.Fatalf("grace: %v", err)
+	}
+	if !bytes.Equal(cached.ContentKey, contentKey) || !bytes.Equal(cached.StateKey, live.StateKey) {
+		t.Fatal("grace start returned different keys")
+	}
+}

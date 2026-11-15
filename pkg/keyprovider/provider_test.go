@@ -169,3 +169,39 @@ func (staleAttester) Name() string { return "stale" }
 func (s staleAttester) Evidence(ctx context.Context, _ []byte) ([]byte, error) {
 	return attesttest.Attester{}.Evidence(ctx, s.bindData)
 }
+
+// The state key comes from the binding material: each fingerprint of a pool
+// license gives a different one, none equals the content key, and it is
+// stable across starts.
+func TestStateKeyIsBindingDerived(t *testing.T) {
+	contentKey, _ := crypto.RandomKey()
+	now := time.Now().Unix()
+	c := license.Claims{
+		Version: license.FormatVersion, LicenseID: "lic_p", Product: "p", PayloadID: "b",
+		IssuedAt: now, NotAfter: now + 3600, Binding: license.Binding{Policy: license.BindPool, Max: 2},
+	}
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, []byte("fp-a"), contentKey), wrapForTest(t, c, []byte("fp-b"), contentKey)}
+	a, err := UnwrapKeys(c, []byte("fp-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := UnwrapKeys(c, []byte("fp-a"))
+	b, _ := UnwrapKeys(c, []byte("fp-b"))
+	if !bytes.Equal(a.ContentKey, contentKey) || !bytes.Equal(b.ContentKey, contentKey) {
+		t.Fatal("content key mismatch")
+	}
+	if len(a.StateKey) != 32 || bytes.Equal(a.StateKey, b.StateKey) || bytes.Equal(a.StateKey, contentKey) || !bytes.Equal(a.StateKey, a2.StateKey) {
+		t.Fatal("state key must be 32 bytes, per binding, stable, and not the content key")
+	}
+	// Another license with the same content key and fingerprint gets another state key.
+	c2 := c
+	c2.LicenseID = "lic_q"
+	c2.WrappedKeys = [][]byte{wrapForTest(t, c2, []byte("fp-a"), contentKey)}
+	other, _ := UnwrapKeys(c2, []byte("fp-a"))
+	if bytes.Equal(other.StateKey, a.StateKey) {
+		t.Fatal("state key shared across licenses")
+	}
+	if _, err := UnwrapKeys(c, []byte("fp-x")); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unbound fingerprint: %v", err)
+	}
+}

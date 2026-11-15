@@ -30,6 +30,44 @@ var (
 	ErrDenied = errors.New("keyprovider: server refused to release the key (e.g. attestation rejected)")
 )
 
+// Unlocked is what a provider recovers for a license.
+type Unlocked struct {
+	// ContentKey decrypts the payload.
+	ContentKey []byte
+	// StateKey seals the loader's local state (crypto.DeriveStateKey of the
+	// binding material that unwrapped the content key). Nil if the provider
+	// does not implement Unlocker.
+	StateKey []byte
+}
+
+// Wipe zeroes both keys.
+func (u Unlocked) Wipe() {
+	crypto.Wipe(u.ContentKey)
+	crypto.Wipe(u.StateKey)
+}
+
+// Unlocker is implemented by providers that also return a state key. All the
+// built-in providers do.
+type Unlocker interface {
+	Unlock(ctx context.Context, lic *license.License) (Unlocked, error)
+}
+
+// Unlock uses p's Unlock if it has one, and ContentKey otherwise (with no
+// state key).
+func Unlock(ctx context.Context, p Provider, lic *license.License) (Unlocked, error) {
+	if u, ok := p.(Unlocker); ok {
+		return u.Unlock(ctx, lic)
+	}
+	k, err := p.ContentKey(ctx, lic)
+	return Unlocked{ContentKey: k}, err
+}
+
+// contentKeyOnly adapts an Unlock result to ContentKey.
+func contentKeyOnly(u Unlocked, err error) ([]byte, error) {
+	crypto.Wipe(u.StateKey)
+	return u.ContentKey, err
+}
+
 // Select returns the first provider that handles the license's binding policy.
 func Select(lic *license.License, providers ...Provider) (Provider, error) {
 	for _, p := range providers {
@@ -44,19 +82,32 @@ func Select(lic *license.License, providers ...Provider) (Provider, error) {
 // tries every wrapped key until one authenticates. A returned key is genuine
 // (a wrong KEK fails the AEAD tag).
 func Unwrap(c license.Claims, material []byte) ([]byte, error) {
+	return contentKeyOnly(UnwrapKeys(c, material))
+}
+
+// UnwrapKeys is Unwrap that also derives the state key from the binding
+// material that unwrapped the content key.
+func UnwrapKeys(c license.Claims, material []byte) (Unlocked, error) {
 	bctx, err := c.BindingContext()
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), bctx)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(kek)
 	for _, wk := range c.WrappedKeys {
-		if key, err := crypto.UnwrapKey(kek, wk); err == nil {
-			return key, nil
+		key, err := crypto.UnwrapKey(kek, wk)
+		if err != nil {
+			continue
 		}
+		sk, err := crypto.DeriveStateKey(material, []byte(c.LicenseID), bctx)
+		if err != nil {
+			crypto.Wipe(key)
+			return Unlocked{}, err
+		}
+		return Unlocked{ContentKey: key, StateKey: sk}, nil
 	}
-	return nil, ErrNotBound
+	return Unlocked{}, ErrNotBound
 }

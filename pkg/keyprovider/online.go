@@ -51,6 +51,11 @@ func (Online) Handles(p license.BindingPolicy) bool { return p == license.BindOn
 
 // ContentKey implements Provider.
 func (o Online) ContentKey(ctx context.Context, lic *license.License) ([]byte, error) {
+	return contentKeyOnly(o.Unlock(ctx, lic))
+}
+
+// Unlock implements Unlocker.
+func (o Online) Unlock(ctx context.Context, lic *license.License) (Unlocked, error) {
 	var g *graceConfig
 	if o.CacheDir != "" && o.Grace > 0 {
 		g = &graceConfig{dir: o.CacheDir, window: o.Grace}
@@ -66,11 +71,11 @@ type graceConfig struct {
 
 // fetchAndUnwrap runs the online request / verify / unwrap flow. grace is nil
 // when the outage cache is disabled.
-func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, grace *graceConfig) ([]byte, error) {
+func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, grace *graceConfig) (Unlocked, error) {
 	c := lic.Claims
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	m, _ := machine.ID()
 	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{
@@ -81,31 +86,32 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 		// Server unreachable: ride out the outage with the cached content key, if any.
 		var ue *unreachableError
 		if grace != nil && errors.As(err, &ue) {
-			if key, gerr := graceUnwrap(grace, c); gerr == nil {
+			if u, gerr := graceUnwrap(grace, c); gerr == nil {
 				fmt.Fprintln(os.Stderr, "cryptship: license server unreachable, using grace cache:", err)
-				return key, nil
+				return u, nil
 			} else if !errors.Is(gerr, os.ErrNotExist) {
 				fmt.Fprintln(os.Stderr, "cryptship: grace cache present but unusable:", gerr)
 			}
 		}
-		return nil, err
+		return Unlocked{}, err
 	}
 	kr, err := online.VerifyKeyResponse(respBody, keys, c.LicenseID, nonce, time.Now())
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(kr.Secret)
-	key, err := Unwrap(c, kr.Secret)
+	u, err := UnwrapKeys(c, kr.Secret)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	if grace != nil {
-		// Cache the content key, not the per-license secret: the content key is
-		// per build and already lives in the running app's memory, so caching it
-		// adds no portable license-wide credential.
-		graceStore(grace, c, key, kr.NotAfter) // best effort
+		// Cache the content key (and the local state key), not the
+		// per-license secret: the content key is per build and already lives
+		// in the running app's memory, and the state key only seals local
+		// state, so caching them adds no portable license-wide credential.
+		graceStore(grace, c, u, kr.NotAfter) // best effort
 	}
-	return key, nil
+	return u, nil
 }
 
 // unreachableError marks a transport failure (no answer from the server), the
@@ -208,14 +214,18 @@ func gracePath(dir, licenseID string) string {
 	return filepath.Join(dir, "online-grace-"+url.PathEscape(licenseID))
 }
 
-func graceStore(g *graceConfig, c license.Claims, contentKey []byte, serverNotAfter int64) {
+func graceStore(g *graceConfig, c license.Claims, u Unlocked, serverNotAfter int64) {
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
 		return
 	}
 	defer crypto.Wipe(kek)
 	cachedAt := time.Now().Unix()
-	sealed, err := crypto.Seal(kek, contentKey, graceAD(c.LicenseID, cachedAt, serverNotAfter))
+	// The sealed value is content key || state key (64 bytes); a 32-byte
+	// record from an older loader holds the content key only.
+	pt := append(append([]byte{}, u.ContentKey...), u.StateKey...)
+	defer crypto.Wipe(pt)
+	sealed, err := crypto.Seal(kek, pt, graceAD(c.LicenseID, cachedAt, serverNotAfter))
 	if err != nil {
 		return
 	}
@@ -229,38 +239,46 @@ func graceStore(g *graceConfig, c license.Claims, contentKey []byte, serverNotAf
 	_ = os.WriteFile(gracePath(g.dir, c.LicenseID), rec, 0o600)
 }
 
-// graceUnwrap returns the cached content key if the cache is present, within the
+// graceUnwrap returns the cached keys if the cache is present, within the
 // local window AND the server-stated NotAfter, not clock-rolled-back, and its
 // authenticated timestamps are intact.
-func graceUnwrap(g *graceConfig, c license.Claims) ([]byte, error) {
+func graceUnwrap(g *graceConfig, c license.Claims) (Unlocked, error) {
 	b, err := os.ReadFile(gracePath(g.dir, c.LicenseID))
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	var rec graceRecord
 	if err := json.Unmarshal(b, &rec); err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	now := time.Now().Unix()
 	if rec.CachedAt > now+license.ClockSkew {
-		return nil, errors.New("grace cache: cached in the future (clock rollback)")
+		return Unlocked{}, errors.New("grace cache: cached in the future (clock rollback)")
 	}
 	if time.Since(time.Unix(rec.CachedAt, 0)) > g.window {
-		return nil, errors.New("grace cache: older than the grace window")
+		return Unlocked{}, errors.New("grace cache: older than the grace window")
 	}
 	if rec.NotAfter != 0 && now > rec.NotAfter {
-		return nil, errors.New("grace cache: past the server-stated validity")
+		return Unlocked{}, errors.New("grace cache: past the server-stated validity")
 	}
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(kek)
 	// Open also authenticates CachedAt/NotAfter via the AAD: editing them to
 	// widen the window makes this fail.
-	contentKey, err := crypto.Open(kek, rec.Sealed, graceAD(c.LicenseID, rec.CachedAt, rec.NotAfter))
+	pt, err := crypto.Open(kek, rec.Sealed, graceAD(c.LicenseID, rec.CachedAt, rec.NotAfter))
 	if err != nil {
-		return nil, fmt.Errorf("grace cache: %w (tampered, or a different machine)", err)
+		return Unlocked{}, fmt.Errorf("grace cache: %w (tampered, or a different machine)", err)
 	}
-	return contentKey, nil
+	switch len(pt) {
+	case 2 * crypto.KeySize:
+		return Unlocked{ContentKey: pt[:crypto.KeySize], StateKey: pt[crypto.KeySize:]}, nil
+	case crypto.KeySize:
+		return Unlocked{ContentKey: pt}, nil
+	default:
+		crypto.Wipe(pt)
+		return Unlocked{}, errors.New("grace cache: malformed record")
+	}
 }
