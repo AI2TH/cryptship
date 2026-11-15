@@ -112,6 +112,11 @@ func run(cfg config) error {
 	}
 	defer crypto.Wipe(contentKey)
 
+	// 3b. Refuse a clock set back to keep an expiring license alive.
+	if err := checkClock(stateDir(), lic.Claims, contentKey, time.Now()); err != nil {
+		return err
+	}
+
 	// 4. Decrypt the payload (AEAD bound to the signed payload id).
 	blob, err := os.ReadFile(cfg.payloadPath)
 	if err != nil {

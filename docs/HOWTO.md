@@ -258,7 +258,7 @@ accepts both versions.
 | `CRYPTSHIP_EXTRACT` | `/run/cryptship/app` | decrypt dir (put on tmpfs) |
 | `CRYPTSHIP_REQUIRE_TMPFS` | unset | `1` = refuse if not tmpfs |
 | `CRYPTSHIP_REVOCATION` | `open` | `open` / `closed` / `grace:<dur>` |
-| `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | where grace state is cached |
+| `CRYPTSHIP_STATE_DIR` | `/var/lib/cryptship` | revocation-grace and clock-rollback state (best effort: if it is not writable the clock check is skipped with a warning) |
 
 ### CLI commands
 | Command | Purpose |
