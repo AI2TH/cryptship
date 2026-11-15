@@ -58,31 +58,36 @@ func (Attested) Name() string { return "attested" }
 // Handles implements Provider.
 func (Attested) Handles(p license.BindingPolicy) bool { return p == license.BindAttested }
 
-// ContentKey implements Provider. Attested never uses the outage grace cache:
-// every start re-attests.
+// ContentKey implements Provider.
 func (a Attested) ContentKey(ctx context.Context, lic *license.License) ([]byte, error) {
+	return contentKeyOnly(a.Unlock(ctx, lic))
+}
+
+// Unlock implements Unlocker. Attested never uses the outage grace cache:
+// every start re-attests.
+func (a Attested) Unlock(ctx context.Context, lic *license.License) (Unlocked, error) {
 	if a.Attester == nil {
-		return nil, ErrNoTEE
+		return Unlocked{}, ErrNoTEE
 	}
 	c := lic.Claims
 
 	chBody, err := postJSON(ctx, a.Client, c, "/v1/challenge", online.ChallengeRequest{LicenseID: c.LicenseID})
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	var ch online.ChallengeResponse
 	if err := json.Unmarshal(chBody, &ch); err != nil || len(ch.Challenge) == 0 {
-		return nil, errors.New("attested: bad challenge from server")
+		return Unlocked{}, errors.New("attested: bad challenge from server")
 	}
 
 	eph, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	ephPub := eph.PublicKey().Bytes()
 	evidence, err := a.Attester.Evidence(ctx, online.AttestationBinding(c.LicenseID, ch.Challenge, ephPub))
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 
 	m, _ := machine.ID()
@@ -92,21 +97,21 @@ func (a Attested) ContentKey(ctx context.Context, lic *license.License) ([]byte,
 		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
 	})
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	kr, err := online.VerifyAttestedKeyResponse(body, a.Keys, c.LicenseID, ch.Challenge, ephPub, time.Now())
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	secret, err := online.OpenFromServer(eph, kr.ServerPub, c.LicenseID, ch.Challenge, kr.SealedSecret)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(secret)
 	if len(secret) != online.SecretSize {
-		return nil, errors.New("attested: secret has the wrong size")
+		return Unlocked{}, errors.New("attested: secret has the wrong size")
 	}
-	return Unwrap(c, secret)
+	return UnwrapKeys(c, secret)
 }
 
 // noTEE is the default attester on hosts without confidential-compute hardware.

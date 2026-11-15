@@ -7,9 +7,10 @@ import (
 
 // Domain-separation labels. Changing any of these is a breaking format change.
 const (
-	kekInfo = "cryptship/kek/v2" // v2: context-bound
-	wrapAAD = "cryptship/wrapped-key/v1"
-	blobAAD = "cryptship/payload/v1"
+	kekInfo   = "cryptship/kek/v2" // v2: context-bound
+	stateInfo = "cryptship/state-key/v1"
+	wrapAAD   = "cryptship/wrapped-key/v1"
+	blobAAD   = "cryptship/payload/v1"
 )
 
 // DeriveKEK derives a 32-byte key-encryption key from binding material, a
@@ -21,6 +22,16 @@ const (
 func DeriveKEK(bindingMaterial, salt, context []byte) ([]byte, error) {
 	h := sha256.Sum256(context)
 	return hkdf.Key(sha256.New, bindingMaterial, salt, kekInfo+"\x00"+string(h[:]), KeySize)
+}
+
+// DeriveStateKey derives a 32-byte key for sealing the loader's local state
+// (clock-rollback and revocation-grace records) from the same binding
+// material, salt and claims context as the KEK, under a different HKDF label.
+// It is per license and per binding (machine fingerprint, server secret), and
+// is independent of the content key and the KEK.
+func DeriveStateKey(bindingMaterial, salt, context []byte) ([]byte, error) {
+	h := sha256.Sum256(context)
+	return hkdf.Key(sha256.New, bindingMaterial, salt, stateInfo+"\x00"+string(h[:]), KeySize)
 }
 
 // WrapKey encrypts a content key under a KEK.

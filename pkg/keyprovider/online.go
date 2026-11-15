@@ -51,6 +51,11 @@ func (Online) Handles(p license.BindingPolicy) bool { return p == license.BindOn
 
 // ContentKey implements Provider.
 func (o Online) ContentKey(ctx context.Context, lic *license.License) ([]byte, error) {
+	return contentKeyOnly(o.Unlock(ctx, lic))
+}
+
+// Unlock implements Unlocker.
+func (o Online) Unlock(ctx context.Context, lic *license.License) (Unlocked, error) {
 	var g *graceConfig
 	if o.CacheDir != "" && o.Grace > 0 {
 		g = &graceConfig{dir: o.CacheDir, window: o.Grace}
@@ -66,11 +71,11 @@ type graceConfig struct {
 
 // fetchAndUnwrap runs the online request / verify / unwrap flow. grace is nil
 // when the outage cache is disabled.
-func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, grace *graceConfig) ([]byte, error) {
+func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, grace *graceConfig) (Unlocked, error) {
 	c := lic.Claims
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	m, _ := machine.ID()
 	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{
@@ -81,22 +86,22 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 		// Server unreachable: ride out the outage with a cached secret, if any.
 		var ue *unreachableError
 		if grace != nil && errors.As(err, &ue) {
-			if key, gerr := graceUnwrap(grace, c); gerr == nil {
+			if u, gerr := graceUnwrap(grace, c); gerr == nil {
 				fmt.Fprintln(os.Stderr, "cryptship: license server unreachable, using grace cache:", err)
-				return key, nil
+				return u, nil
 			}
 		}
-		return nil, err
+		return Unlocked{}, err
 	}
 	kr, err := online.VerifyKeyResponse(respBody, keys, c.LicenseID, nonce, time.Now())
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	if grace != nil {
 		graceStore(grace, c, kr.Secret, kr.NotAfter) // best effort
 	}
 	defer crypto.Wipe(kr.Secret)
-	return Unwrap(c, kr.Secret)
+	return UnwrapKeys(c, kr.Secret)
 }
 
 // unreachableError marks a transport failure (no answer from the server), the
@@ -213,30 +218,30 @@ func graceStore(g *graceConfig, c license.Claims, secret []byte, serverNotAfter 
 	_ = os.WriteFile(gracePath(g.dir, c.LicenseID), rec, 0o600)
 }
 
-func graceUnwrap(g *graceConfig, c license.Claims) ([]byte, error) {
+func graceUnwrap(g *graceConfig, c license.Claims) (Unlocked, error) {
 	b, err := os.ReadFile(gracePath(g.dir, c.LicenseID))
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	var rec graceRecord
 	if err := json.Unmarshal(b, &rec); err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	if rec.CachedAt > time.Now().Unix()+license.ClockSkew {
-		return nil, errors.New("grace cache: cached in the future (clock rollback)")
+		return Unlocked{}, errors.New("grace cache: cached in the future (clock rollback)")
 	}
 	if time.Since(time.Unix(rec.CachedAt, 0)) > g.window {
-		return nil, errors.New("grace cache: older than the grace window")
+		return Unlocked{}, errors.New("grace cache: older than the grace window")
 	}
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(kek)
 	secret, err := crypto.Open(kek, rec.Sealed, []byte(graceAAD+"|"+c.LicenseID))
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(secret)
-	return Unwrap(c, secret)
+	return UnwrapKeys(c, secret)
 }

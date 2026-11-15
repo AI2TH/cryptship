@@ -22,28 +22,33 @@ func (Offline) Handles(p license.BindingPolicy) bool {
 }
 
 // ContentKey implements Provider.
-func (Offline) ContentKey(_ context.Context, lic *license.License) ([]byte, error) {
+func (o Offline) ContentKey(ctx context.Context, lic *license.License) ([]byte, error) {
+	return contentKeyOnly(o.Unlock(ctx, lic))
+}
+
+// Unlock implements Unlocker.
+func (Offline) Unlock(_ context.Context, lic *license.License) (Unlocked, error) {
 	c := lic.Claims
 	switch c.Binding.Policy {
 	case license.BindNone:
 		if len(c.UnboundSecret) == 0 {
-			return nil, errors.New("offline: none-binding license is missing its unbound secret")
+			return Unlocked{}, errors.New("offline: none-binding license is missing its unbound secret")
 		}
-		return Unwrap(c, c.UnboundSecret)
+		return UnwrapKeys(c, c.UnboundSecret)
 
 	case license.BindStrict, license.BindPool:
 		cands, err := machine.Candidates()
 		if err != nil {
-			return nil, fmt.Errorf("offline: %w", err)
+			return Unlocked{}, fmt.Errorf("offline: %w", err)
 		}
 		for _, cand := range cands {
-			if key, err := Unwrap(c, []byte(cand.ID)); err == nil {
-				return key, nil
+			if u, err := UnwrapKeys(c, []byte(cand.ID)); err == nil {
+				return u, nil
 			}
 		}
-		return nil, fmt.Errorf("offline: %w (checked %d fingerprint(s) for license %s)", ErrNotBound, len(cands), c.LicenseID)
+		return Unlocked{}, fmt.Errorf("offline: %w (checked %d fingerprint(s) for license %s)", ErrNotBound, len(cands), c.LicenseID)
 
 	default:
-		return nil, fmt.Errorf("offline: unsupported policy %q", c.Binding.Policy)
+		return Unlocked{}, fmt.Errorf("offline: unsupported policy %q", c.Binding.Policy)
 	}
 }
