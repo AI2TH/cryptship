@@ -17,5 +17,11 @@ COPY --from=build /loader /cryptship-loader
 COPY examples/demo-python/_work_compiled/payload.enc  /cryptship/payload.enc
 COPY examples/demo-python/_work_compiled/license.json /cryptship/license.json
 COPY examples/demo-python/_work_compiled/vendor.pub   /cryptship/vendor.pub
+# Run as an unprivileged user, never root. The loader decrypts into
+# /run/cryptship, so mount the tmpfs writable by this uid (docker's default
+# --tmpfs mode 1777 is; see deploy/README.md for a 0700 mount owned by 65532).
+# /var/lib/cryptship holds revocation-grace and clock state.
+RUN mkdir -p /var/lib/cryptship && chown 65532:65532 /var/lib/cryptship
+USER 65532:65532
 ENTRYPOINT ["/cryptship-loader"]
 CMD ["--", "python", "app.pyc"]
