@@ -13,6 +13,12 @@ IMG="ghcr.io/mermaid-js/mermaid-cli/mermaid-cli@sha256:18938e53497376d524e04b1fc
 # /var/folders and /tmp are not shared into the VM by default.
 tmp="$(mktemp -d "$ROOT/.mermaid-check.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+# mktemp -d makes the dir 0700. On Linux a bind mount keeps that, so the
+# mermaid-cli container user (uid 1001, not ours) could not read the blocks.
+# Open it for reading only: the container mounts it read-only and writes the
+# SVG to stdout. (Docker Desktop and colima on macOS remap ownership, which is
+# why this only failed on Linux.)
+chmod 0755 "$tmp"
 
 python3 - "$ROOT" "$tmp" <<'PY'
 import sys, re, pathlib
@@ -23,7 +29,9 @@ for md in sorted(root.rglob("*.md")):
         continue
     for blk in re.findall(r"```mermaid\n(.*?)```", md.read_text(), re.S):
         i += 1
-        (tmp / f"{i:03d}.mmd").write_text(blk)
+        p = tmp / f"{i:03d}.mmd"
+        p.write_text(blk)
+        p.chmod(0o644)
 print(f"extracted {i} mermaid block(s)")
 PY
 
@@ -38,7 +46,7 @@ render() { # render <in.mmd> <out.svg>
   if command -v mmdc >/dev/null 2>&1; then
     mmdc -q -p "$tmp/pp.json" -i "$1" -o "$2"
   else
-    docker run --rm -v "$tmp":/data "$IMG" -i "/data/$(basename "$1")" -o "/data/$(basename "$2")"
+    docker run --rm -v "$tmp":/data:ro "$IMG" -i "/data/$(basename "$1")" -o - -e svg > "$2"
   fi
 }
 
