@@ -89,6 +89,7 @@ func (a Attested) ContentKey(ctx context.Context, lic *license.License) ([]byte,
 	body, err := postJSON(ctx, a.Client, c, "/v1/key", online.KeyRequest{
 		LicenseID: c.LicenseID, Machine: m, Nonce: ch.Challenge,
 		Attestation: evidence, EphemeralPub: ephPub,
+		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
 	})
 	if err != nil {
 		return nil, err

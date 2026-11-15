@@ -19,6 +19,7 @@ import (
 
 	"github.com/AI2TH/cryptship/pkg/attest"
 	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/license"
 	"github.com/AI2TH/cryptship/pkg/online"
 )
 
@@ -43,6 +44,11 @@ type Server struct {
 	Verifier attest.Verifier
 	// ChallengeTTL is how long a challenge stays valid (default 2 minutes).
 	ChallengeTTL time.Duration
+	// NoLegacySecrets refuses requests for the legacy (secret version 0)
+	// derivation, which does not bind the policy: under it, a server that
+	// skips attestation can release an attested license's secret. Set it once
+	// every online/attested license in use carries binding.secret_v 2.
+	NoLegacySecrets bool
 
 	mu         sync.Mutex
 	denyWarned bool // warn once if RevokedFile becomes unreadable
@@ -195,15 +201,22 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 		s.handleAttestedKey(w, req)
 		return
 	}
-	if s.Verifier != nil {
-		// A server that verifies attestation serves only the attested
-		// protocol: a plain request carries no evidence bound to a challenge.
-		http.Error(w, "attestation required", http.StatusForbidden)
+	// A plain request (no attestation protocol) can only ever get an online
+	// secret. Under secret version 2 the attested secret differs, so this
+	// path cannot release it.
+	switch {
+	case req.SecretVersion == license.SecretVersion2 && req.Policy != string(license.BindOnline):
+		http.Error(w, "attested licenses need the attested protocol", http.StatusForbidden)
+		return
+	case req.SecretVersion == license.SecretVersionLegacy && (s.NoLegacySecrets || s.Verifier != nil):
+		// Legacy secrets do not bind the policy; a server that verifies
+		// attestation must not hand them out without it.
+		http.Error(w, "legacy secret derivation refused by this server", http.StatusForbidden)
 		return
 	}
-	secret, err := online.DeriveSecret(s.Master, req.LicenseID)
+	secret, err := online.DeriveSecretFor(s.Master, req.LicenseID, string(license.BindOnline), req.SecretVersion)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		http.Error(w, "unsupported secret version", http.StatusBadRequest)
 		return
 	}
 	defer crypto.Wipe(secret)
@@ -239,9 +252,13 @@ func (s *Server) handleAttestedKey(w http.ResponseWriter, req online.KeyRequest)
 		http.Error(w, "attestation rejected", http.StatusForbidden)
 		return
 	}
-	secret, err := online.DeriveSecret(s.Master, req.LicenseID)
+	if req.SecretVersion == license.SecretVersionLegacy && s.NoLegacySecrets {
+		http.Error(w, "legacy secret derivation refused by this server", http.StatusForbidden)
+		return
+	}
+	secret, err := online.DeriveSecretFor(s.Master, req.LicenseID, string(license.BindAttested), req.SecretVersion)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		http.Error(w, "unsupported secret version", http.StatusBadRequest)
 		return
 	}
 	defer crypto.Wipe(secret)

@@ -237,6 +237,7 @@ func cmdIssue(args []string) error {
 	revURL := fs.String("revocation-url", "", "optional revocation check URL")
 	out := fs.String("out", "license.json", "output license path")
 	licVersion := fs.Int("license-version", license.FormatVersion, "license format version: 2 binds every claim into the KEK; 1 only for loaders older than v2 support")
+	secretVersion := fs.Int("server-secret-version", license.SecretVersion2, "online/attested: server secret derivation; 2 binds the policy (an online server cannot release attested secrets), 0 = legacy, for loaders and servers that predate it")
 	var fps stringList
 	fs.Var(&fps, "fingerprint", "bound machine fingerprint (repeatable; strict=1, pool>=1)")
 	var ents stringList
@@ -313,7 +314,10 @@ func cmdIssue(args []string) error {
 		SigningKeyID:  *keyID,
 	}
 
-	if err := wrapInto(&claims, license.BindingPolicy(*binding), contentKey, fps, *server, master); err != nil {
+	if *secretVersion != license.SecretVersionLegacy && *secretVersion != license.SecretVersion2 {
+		return fmt.Errorf("issue: --server-secret-version must be %d or %d", license.SecretVersionLegacy, license.SecretVersion2)
+	}
+	if err := wrapInto(&claims, license.BindingPolicy(*binding), contentKey, fps, *server, master, *secretVersion); err != nil {
 		return err
 	}
 	if err := claims.Validate(); err != nil {
@@ -338,7 +342,7 @@ func cmdIssue(args []string) error {
 	return nil
 }
 
-func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte, fps []string, server string, master []byte) error {
+func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte, fps []string, server string, master []byte, secretVersion int) error {
 	switch policy {
 	case license.BindNone:
 		secret, err := crypto.RandomKey()
@@ -367,11 +371,14 @@ func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte
 		if server == "" || len(master) == 0 {
 			return errors.New("issue: online/attested binding needs --server and --server-master-key")
 		}
-		c.Binding = license.Binding{Policy: policy, Server: server}
-		secret, err := online.DeriveSecret(master, c.LicenseID)
+		// secret_v is part of the claims (and of the v2 KEK context), so it
+		// is set before wrapping.
+		c.Binding = license.Binding{Policy: policy, Server: server, SecretVersion: secretVersion}
+		secret, err := online.DeriveSecretFor(master, c.LicenseID, string(policy), secretVersion)
 		if err != nil {
 			return err
 		}
+		defer crypto.Wipe(secret)
 		return wrapWith(c, secret, contentKey)
 
 	default:

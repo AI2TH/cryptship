@@ -33,6 +33,7 @@ func main() {
 	ttl := flag.Duration("ttl", 24*time.Hour, "validity of each key answer")
 	revoke := flag.String("revoke", "", "comma-separated license ids to deny (static)")
 	revokeFile := flag.String("revoke-file", "", "path to a live denylist (one license id per line); edit it to revoke without restarting")
+	noLegacy := flag.Bool("no-legacy-secrets", false, "refuse licenses issued without binding.secret_v 2 (their secret does not bind the policy, so this server could release attested secrets)")
 	requireAtt := flag.Bool("require-attestation", false, "require verified TEE attestation (fails to start: no verifier is built in yet)")
 	flag.Parse()
 
@@ -58,6 +59,8 @@ func main() {
 		TTL:         *ttl,
 		Revoked:     revoked,
 		RevokedFile: *revokeFile,
+
+		NoLegacySecrets: *noLegacy,
 	}
 	verifier, err := attestationVerifier(*requireAtt, builtinVerifier())
 	must(err, "--require-attestation")

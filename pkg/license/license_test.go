@@ -145,3 +145,25 @@ func TestExpired(t *testing.T) {
 		t.Fatalf("no-expiry license reported expired")
 	}
 }
+
+func TestValidateSecretVersion(t *testing.T) {
+	base := Claims{Version: FormatVersion, LicenseID: "l", PayloadID: "p", WrappedKeys: [][]byte{{1}},
+		Binding: Binding{Policy: BindOnline, Server: "https://k"}}
+	for _, sv := range []int{SecretVersionLegacy, SecretVersion2} {
+		c := base
+		c.Binding.SecretVersion = sv
+		if err := c.Validate(); err != nil {
+			t.Fatalf("secret_v %d: %v", sv, err)
+		}
+	}
+	c := base
+	c.Binding.SecretVersion = 1
+	if err := c.Validate(); err == nil {
+		t.Fatal("secret_v 1 accepted")
+	}
+	c = Claims{Version: FormatVersion, LicenseID: "l", PayloadID: "p", WrappedKeys: [][]byte{{1}},
+		Binding: Binding{Policy: BindStrict, SecretVersion: SecretVersion2}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("secret_v accepted on a strict license")
+	}
+}
