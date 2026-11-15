@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AI2TH/cryptship/pkg/crypto"
 	"github.com/AI2TH/cryptship/pkg/keyprovider"
@@ -113,5 +114,36 @@ func TestMasterKeyRefusesOverwrite(t *testing.T) {
 	}
 	if err := cmdMasterKey([]string{"--out", path, "--force"}); err != nil {
 		t.Fatalf("--force: %v", err)
+	}
+}
+
+func TestResolveExpiry(t *testing.T) {
+	start, _ := time.Parse(time.RFC3339, "2027-03-31T00:00:00Z")
+	end, _ := time.Parse(time.RFC3339, "2027-03-31T23:59:59Z")
+	if got, err := resolveExpiry("2027-03-31", 0, false); err != nil || got != start.Unix() {
+		t.Fatalf("start of day: %d %v", got, err)
+	}
+	got, err := resolveExpiry("2027-03-31", 0, true)
+	if err != nil || got != end.Unix() {
+		t.Fatalf("end of day: %d %v", got, err)
+	}
+	c := license.Claims{NotAfter: got}
+	if c.Expired(end.Unix()) {
+		t.Fatal("expired during the last second of the day")
+	}
+	if !c.Expired(end.Unix() + 1) {
+		t.Fatal("still valid at 00:00:00 the next day")
+	}
+	for _, tc := range []struct {
+		date string
+		days int
+		eod  bool
+	}{{"", 0, true}, {"2027-03-31", 5, false}, {"31/03/2027", 0, false}} {
+		if _, err := resolveExpiry(tc.date, tc.days, tc.eod); err == nil {
+			t.Errorf("%+v: accepted", tc)
+		}
+	}
+	if got, err := resolveExpiry("", 0, false); err != nil || got != 0 {
+		t.Fatalf("no expiry: %d %v", got, err)
 	}
 }
