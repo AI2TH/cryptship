@@ -147,9 +147,9 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 		t.Fatalf("no-TEE: err = %v, want ErrNoTEE", err)
 	}
 
-	// Evidence that is not bound to this request's nonce (e.g. replayed from
-	// an earlier request) is refused by the server.
-	stale := staleAttester{bindData: online.AttestationNonce(lic.Claims.LicenseID, []byte("an-older-nonce!!"))}
+	// Evidence that is not bound to this request's challenge and ephemeral
+	// key (e.g. replayed from an earlier request) is refused by the server.
+	stale := staleAttester{bindData: online.AttestationBinding(lic.Claims.LicenseID, []byte("an-older-challenge"), make([]byte, 32))}
 	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: stale}).ContentKey(context.Background(), lic); !errors.Is(err, ErrDenied) {
 		t.Fatalf("evidence for another nonce: err = %v, want ErrDenied", err)
 	}

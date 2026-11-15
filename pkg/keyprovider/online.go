@@ -55,7 +55,7 @@ func (o Online) ContentKey(ctx context.Context, lic *license.License) ([]byte, e
 	if o.CacheDir != "" && o.Grace > 0 {
 		g = &graceConfig{dir: o.CacheDir, window: o.Grace}
 	}
-	return fetchAndUnwrap(ctx, o.Keys, o.Client, lic, nil, g)
+	return fetchAndUnwrap(ctx, o.Keys, o.Client, lic, g)
 }
 
 // graceConfig configures the outage cache (online only).
@@ -64,43 +64,20 @@ type graceConfig struct {
 	window time.Duration
 }
 
-// fetchAndUnwrap runs the request / verify / unwrap flow shared by the online
-// and attested providers. evidence is nil for online; for attested it returns
-// evidence bound to the request nonce. grace is non-nil only for online.
-func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, evidence func(nonce []byte) ([]byte, error), grace *graceConfig) ([]byte, error) {
+// fetchAndUnwrap runs the online request / verify / unwrap flow. grace is nil
+// when the outage cache is disabled.
+func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, grace *graceConfig) ([]byte, error) {
 	c := lic.Claims
-	if c.Binding.Server == "" {
-		return nil, errors.New("online: license has no binding.server")
-	}
-	if client == nil {
-		return nil, errors.New("online: no HTTP client configured")
-	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
-	var attestation []byte
-	if evidence != nil {
-		var err error
-		if attestation, err = evidence(nonce); err != nil {
-			return nil, err
-		}
-	}
 	m, _ := machine.ID()
-	body, err := json.Marshal(online.KeyRequest{LicenseID: c.LicenseID, Machine: m, Nonce: nonce, Attestation: attestation})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.Binding.Server, "/")+"/v1/key", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
+	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{LicenseID: c.LicenseID, Machine: m, Nonce: nonce})
 	if err != nil {
 		// Server unreachable: ride out the outage with the cached content key, if any.
-		if grace != nil {
+		var ue *unreachableError
+		if grace != nil && errors.As(err, &ue) {
 			if key, gerr := graceUnwrap(grace, c); gerr == nil {
 				fmt.Fprintln(os.Stderr, "cryptship: license server unreachable, using grace cache:", err)
 				return key, nil
@@ -108,22 +85,7 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 				fmt.Fprintln(os.Stderr, "cryptship: grace cache present but unusable:", gerr)
 			}
 		}
-		return nil, fmt.Errorf("online: %w", err)
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusGone:
-		return nil, ErrRevoked
-	case http.StatusForbidden:
-		return nil, ErrDenied
-	default:
-		return nil, fmt.Errorf("online: server returned %s", resp.Status)
-	}
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, online.MaxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("online: read response: %w", err)
+		return nil, err
 	}
 	kr, err := online.VerifyKeyResponse(respBody, keys, c.LicenseID, nonce, time.Now())
 	if err != nil {
@@ -141,6 +103,53 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 		graceStore(grace, c, key, kr.NotAfter) // best effort
 	}
 	return key, nil
+}
+
+// unreachableError marks a transport failure (no answer from the server), the
+// only failure the outage grace cache may cover.
+type unreachableError struct{ err error }
+
+func (e *unreachableError) Error() string { return "online: " + e.err.Error() }
+func (e *unreachableError) Unwrap() error { return e.err }
+
+// postJSON POSTs v to the license's server at path and returns the body of a
+// 200 answer. 410 maps to ErrRevoked and 403 to ErrDenied; a transport
+// failure is an *unreachableError.
+func postJSON(ctx context.Context, client HTTPClient, c license.Claims, path string, v any) ([]byte, error) {
+	if c.Binding.Server == "" {
+		return nil, errors.New("online: license has no binding.server")
+	}
+	if client == nil {
+		return nil, errors.New("online: no HTTP client configured")
+	}
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.Binding.Server, "/")+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, &unreachableError{err}
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusGone:
+		return nil, ErrRevoked
+	case http.StatusForbidden:
+		return nil, ErrDenied
+	default:
+		return nil, fmt.Errorf("online: server returned %s", resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, online.MaxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("online: read response: %w", err)
+	}
+	return b, nil
 }
 
 // --- outage grace cache ---

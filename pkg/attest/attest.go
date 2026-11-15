@@ -19,8 +19,9 @@ type Measurement struct {
 }
 
 // Verifier checks attestation evidence. nonce is the value the evidence must
-// commit to (online.AttestationNonce of the request), so evidence made for a
-// different request or license is rejected. Verify returns an error for any
+// commit to in REPORT_DATA (online.AttestationBinding of the license id, the
+// server's challenge and the loader's ephemeral public key), so evidence made
+// for another challenge, license or key is rejected. Verify returns an error for any
 // evidence it cannot fully verify; it never accepts by default.
 type Verifier interface {
 	Verify(evidence, nonce []byte) (Measurement, error)

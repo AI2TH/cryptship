@@ -15,18 +15,28 @@ const SecretSize = 32
 type KeyRequest struct {
 	LicenseID string `json:"license_id"`
 	Machine   string `json:"machine,omitempty"` // best-effort fingerprint, for seats
-	Nonce     []byte `json:"nonce"`             // 16 bytes, anti-replay
+	// Nonce is 16 random bytes for online; for attested it is the server's
+	// challenge from /v1/challenge.
+	Nonce []byte `json:"nonce"`
 	// Attestation carries TEE evidence for the attested flow (empty otherwise).
+	// It must commit to AttestationBinding(license_id, nonce, ephemeral_pub).
 	Attestation []byte `json:"attestation,omitempty"`
+	// EphemeralPub is the loader's one-time X25519 public key (attested only);
+	// the server encrypts the secret to it.
+	EphemeralPub []byte `json:"ephemeral_pub,omitempty"`
 }
 
 // KeyResponse is returned by the server. Sig covers ResponseSigningInput so a
 // TLS-terminating proxy cannot forge or replay it.
 type KeyResponse struct {
-	LicenseID    string `json:"license_id"`
-	Nonce        []byte `json:"nonce"`
-	Secret       []byte `json:"secret"` // SecretSize bytes of binding material
-	NotAfter     int64  `json:"not_after"`
+	LicenseID string `json:"license_id"`
+	Nonce     []byte `json:"nonce"`
+	Secret    []byte `json:"secret,omitempty"` // SecretSize bytes of binding material (online)
+	NotAfter  int64  `json:"not_after"`
+	// Attested answers carry the secret only encrypted to the loader's
+	// ephemeral key (see SealToEphemeral), never in Secret.
+	ServerPub    []byte `json:"server_pub,omitempty"`
+	SealedSecret []byte `json:"sealed_secret,omitempty"`
 	SigningKeyID string `json:"signing_key_id"`
 	Sig          []byte `json:"sig"`
 }
@@ -36,20 +46,6 @@ type KeyResponse struct {
 // the license itself.
 func DeriveSecret(master []byte, licenseID string) ([]byte, error) {
 	return hkdf.Key(sha256.New, master, []byte(licenseID), "cryptship/online-secret/v1", SecretSize)
-}
-
-// AttestationNonce is the value attested-mode evidence must commit to (for
-// example in the SEV-SNP / TDX REPORT_DATA field): a hash of the license id and
-// the request nonce, so evidence made for one request or license does not
-// verify for another. The loader's attester and the server's verifier both
-// compute it.
-func AttestationNonce(licenseID string, nonce []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte("cryptship/attestation-nonce/v1\x00"))
-	h.Write([]byte(licenseID))
-	h.Write([]byte{0})
-	h.Write(nonce)
-	return h.Sum(nil)
 }
 
 // CheckResponse is the signed answer to a revocation check (GET /v1/check with a
