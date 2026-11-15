@@ -141,12 +141,14 @@ flowchart TD
   VK["vendor signing key"] -->|"signs"| LIC["license claims"]
   CK["content key (random, per build)"] -->|"AES-256-GCM"| ENC["payload.enc"]
   BM["binding material<br/>fingerprint / server secret / unbound"] --> KEK
-  CTX["claims context<br/>(license id, payload id, expiry, policy)"] --> KEK["KEK = HKDF-SHA256"]
+  CTX["claims context<br/>(v2: hash of every claim)"] --> KEK["KEK = HKDF-SHA256"]
   KEK -->|"wraps"| WK["wrapped content key<br/>(inside the signed license)"]
 ```
 
 The content key encrypts the payload **once per build**; each license wraps that
 same key under a KEK that only reconstitutes with the right binding material. The
-claims context in the KEK (license and customer id, product, payload id, binding
-policy, issue and expiry dates) means editing any of those breaks the unwrap, even
-against a patched loader. Other claims are protected by the signature alone.
+claims context in the KEK means editing a claim breaks the unwrap, even against a
+patched loader. For format v2 (the default) that is every claim except the
+wrapped keys and the unbound secret; for v1 licenses it is only license and
+customer id, product, payload id, binding policy, issue and expiry dates, and the
+other claims are protected by the signature alone.
