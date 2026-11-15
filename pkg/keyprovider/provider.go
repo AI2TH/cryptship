@@ -9,8 +9,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cryptship/cryptship/pkg/crypto"
-	"github.com/cryptship/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/license"
 )
 
 // Provider acquires the content key for a verified license.

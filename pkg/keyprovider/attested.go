@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/cryptship/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/license"
 )
 
 // Attester produces TEE attestation evidence (e.g. an AMD SEV-SNP report or an

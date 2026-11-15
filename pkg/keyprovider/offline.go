@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cryptship/cryptship/pkg/license"
-	"github.com/cryptship/cryptship/pkg/machine"
+	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/machine"
 )
 
 // Offline resolves the content key with no network access, for none/strict/pool

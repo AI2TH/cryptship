@@ -68,6 +68,12 @@ Go container.
 bash scripts/demo.sh
 ```
 
+To install the tools directly (Go 1.24 or later):
+
+```bash
+go install github.com/AI2TH/cryptship/cmd/...@latest
+```
+
 The demo packs a tiny Python app, issues a license, builds the image, then
 **`docker save`s it, unpacks it and greps the result** to show the source isn't there,
 runs it to show it decrypts and works, and finally tampers with the license to

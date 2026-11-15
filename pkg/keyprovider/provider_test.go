@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/crypto"
-	"github.com/cryptship/cryptship/pkg/license"
-	"github.com/cryptship/cryptship/pkg/licenseserver"
-	"github.com/cryptship/cryptship/pkg/online"
+	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/licenseserver"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 // serverBoundLicense builds a license whose content key is wrapped under the KEK

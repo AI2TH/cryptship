@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/licenseserver"
+	"github.com/AI2TH/cryptship/pkg/licenseserver"
 )
 
 func main() {
