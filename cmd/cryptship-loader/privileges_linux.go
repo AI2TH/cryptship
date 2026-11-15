@@ -12,27 +12,28 @@ import (
 
 // secureTree gives every entry under dir (and dir itself) to owner:gid:
 // directories and executables 0750, other files 0640, symlinks re-owned only.
-// It runs as root before the app starts, on a tree only root has written.
+// It runs as root before the app starts, on a tree only root has written. The
+// mode is set before the owner, while root still owns the entry, so the only
+// capability needed is CAP_CHOWN (plus CAP_SETUID and CAP_SETGID to drop).
 func secureTree(dir string, owner, gid int) error {
 	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Lchown(p, owner, gid); err != nil {
-			return err
+		if d.Type()&fs.ModeSymlink == 0 {
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			mode := fs.FileMode(0o640)
+			if d.IsDir() || fi.Mode().Perm()&0o111 != 0 {
+				mode = 0o750
+			}
+			if err := os.Chmod(p, mode); err != nil {
+				return err
+			}
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		mode := fs.FileMode(0o640)
-		if d.IsDir() || fi.Mode().Perm()&0o111 != 0 {
-			mode = 0o750
-		}
-		return os.Chmod(p, mode)
+		return os.Lchown(p, owner, gid)
 	})
 }
 
