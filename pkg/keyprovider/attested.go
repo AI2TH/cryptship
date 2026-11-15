@@ -95,6 +95,7 @@ func (a Attested) Unlock(ctx context.Context, lic *license.License) (Unlocked, e
 		LicenseID: c.LicenseID, Machine: m, Nonce: ch.Challenge,
 		Attestation: evidence, EphemeralPub: ephPub,
 		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
+		License: licenseJSON(lic),
 	})
 	if err != nil {
 		return Unlocked{}, err

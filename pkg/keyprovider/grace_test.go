@@ -5,7 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,5 +112,35 @@ func TestOnlineGraceKeepsStateKey(t *testing.T) {
 	}
 	if !bytes.Equal(cached.ContentKey, contentKey) || !bytes.Equal(cached.StateKey, live.StateKey) {
 		t.Fatal("grace start returned different keys")
+	}
+}
+
+// A 503 from a proxy in front of the server is an outage: grace applies. A
+// revoked answer is not.
+func TestOnlineGraceOnGatewayErrorButNotRevocation(t *testing.T) {
+	pub, priv, master, contentKey := newKeys(t)
+	srv := &licenseserver.Server{Master: master, SignKey: priv, KeyID: "v1", Revoked: map[string]bool{}}
+	var down atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "upstream down", http.StatusServiceUnavailable)
+			return
+		}
+		srv.Handler().ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+	lic := serverBoundLicense(t, priv, master, contentKey, license.BindOnline, ts.URL)
+	o := Online{Keys: license.KeyRing{"v1": pub}, Client: ts.Client(), CacheDir: t.TempDir(), Grace: time.Hour}
+	if _, err := o.ContentKey(context.Background(), lic); err != nil {
+		t.Fatal(err)
+	}
+	down.Store(true)
+	if got, err := o.ContentKey(context.Background(), lic); err != nil || !bytes.Equal(got, contentKey) {
+		t.Fatalf("503 should be ridden out: %v", err)
+	}
+	down.Store(false)
+	srv.Revoked[lic.Claims.LicenseID] = true
+	if _, err := o.ContentKey(context.Background(), lic); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("revoked: err = %v, want ErrRevoked (grace must not cover revocation)", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 )
 
@@ -31,6 +32,9 @@ type KeyRequest struct {
 	// unwrap the license.
 	Policy        string `json:"policy,omitempty"`
 	SecretVersion int    `json:"secret_v,omitempty"`
+	// License is the signed license, for servers that enforce binding.max
+	// machines per license (seats).
+	License json.RawMessage `json:"license,omitempty"`
 }
 
 // KeyResponse is returned by the server. Sig covers ResponseSigningInput so a

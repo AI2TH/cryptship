@@ -120,3 +120,34 @@ func TestVerifyingServerServesOnlineV2Only(t *testing.T) {
 		t.Fatalf("legacy online on a verifying server: err = %v, want ErrDenied", err)
 	}
 }
+
+// A full seat table surfaces as ErrSeatLimit, and the loader sends its
+// license so the server can read binding.max.
+func TestOnlineSeatLimit(t *testing.T) {
+	pub, priv, master, contentKey := newKeys(t)
+	srv := &licenseserver.Server{Master: master, SignKey: priv, KeyID: "v1", Seats: &licenseserver.SeatTracker{}}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	now := time.Now().Unix()
+	c := license.Claims{
+		Version: license.FormatVersion, LicenseID: "lic_seat", PayloadID: "b", IssuedAt: now, NotAfter: now + 3600, SigningKeyID: "v1",
+		Binding: license.Binding{Policy: license.BindOnline, Server: ts.URL, Max: 1, SecretVersion: license.SecretVersion2},
+	}
+	secret, _ := online.DeriveSecretFor(master, c.LicenseID, "online", license.SecretVersion2)
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, secret, contentKey)}
+	lic, err := license.Sign(priv, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another machine holds the only seat.
+	if err := srv.Seats.Claim("lic_seat", "some-other-machine", 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Online{Keys: license.KeyRing{"v1": pub}, Client: ts.Client()}).ContentKey(context.Background(), lic); !errors.Is(err, ErrSeatLimit) {
+		t.Fatalf("err = %v, want ErrSeatLimit", err)
+	}
+	srv.Seats.Release("lic_seat", "some-other-machine")
+	if _, err := (Online{Keys: license.KeyRing{"v1": pub}, Client: ts.Client()}).ContentKey(context.Background(), lic); err != nil && !errors.Is(err, ErrSeatLimit) {
+		t.Fatalf("after release: %v", err)
+	}
+}

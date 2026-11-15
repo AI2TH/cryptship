@@ -81,6 +81,7 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{
 		LicenseID: c.LicenseID, Machine: m, Nonce: nonce,
 		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
+		License: licenseJSON(lic),
 	})
 	if err != nil {
 		// Server unreachable: ride out the outage with the cached content key, if any.
@@ -151,6 +152,12 @@ func postJSON(ctx context.Context, client HTTPClient, c license.Claims, path str
 		return nil, ErrRevoked
 	case http.StatusForbidden:
 		return nil, ErrDenied
+	case http.StatusConflict:
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("%w: %s", ErrSeatLimit, strings.TrimSpace(string(msg)))
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		// A proxy in front of the server reports it down: an outage.
+		return nil, &unreachableError{fmt.Errorf("server returned %s", resp.Status)}
 	default:
 		return nil, fmt.Errorf("online: server returned %s", resp.Status)
 	}
@@ -159,6 +166,18 @@ func postJSON(ctx context.Context, client HTTPClient, c license.Claims, path str
 		return nil, fmt.Errorf("online: read response: %w", err)
 	}
 	return b, nil
+}
+
+// licenseJSON is the signed license as sent for seat enforcement.
+func licenseJSON(lic *license.License) json.RawMessage {
+	if len(lic.ClaimsRaw) == 0 {
+		return nil
+	}
+	b, err := lic.Marshal()
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // --- outage grace cache ---

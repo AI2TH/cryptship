@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/AI2TH/cryptship/pkg/attest"
+	"github.com/AI2TH/cryptship/pkg/license"
 	"github.com/AI2TH/cryptship/pkg/licenseserver"
 )
 
@@ -34,6 +35,10 @@ func main() {
 	revoke := flag.String("revoke", "", "comma-separated license ids to deny (static)")
 	revokeFile := flag.String("revoke-file", "", "path to a live denylist (one license id per line); edit it to revoke without restarting")
 	noLegacy := flag.Bool("no-legacy-secrets", false, "refuse licenses issued without binding.secret_v 2 (their secret does not bind the policy, so this server could release attested secrets)")
+	enforceSeats := flag.Bool("enforce-seats", false, "enforce binding.max distinct machines per license (loaders send their signed license and machine fingerprint)")
+	seatLease := flag.Duration("seat-lease", 30*24*time.Hour, "with --enforce-seats: how long a machine keeps its seat after its last start")
+	seatsFile := flag.String("seats-file", "", "with --enforce-seats: persist seats in this JSON file")
+	licenseKeys := flag.String("license-keys", "", "with --enforce-seats: vendor public key / key ring that signs licenses (default: the public half of --sign)")
 	requireAtt := flag.Bool("require-attestation", false, "require verified TEE attestation (fails to start: no verifier is built in yet)")
 	flag.Parse()
 
@@ -62,11 +67,20 @@ func main() {
 
 		NoLegacySecrets: *noLegacy,
 	}
+	if *enforceSeats {
+		srv.Seats = &licenseserver.SeatTracker{Lease: *seatLease, Path: *seatsFile}
+		if *licenseKeys != "" {
+			b, err := os.ReadFile(*licenseKeys)
+			must(err, "read --license-keys")
+			srv.LicenseKeys, err = license.ParseKeyRing(b)
+			must(err, "parse --license-keys")
+		}
+	}
 	verifier, err := attestationVerifier(*requireAtt, builtinVerifier())
 	must(err, "--require-attestation")
 	srv.Verifier = verifier
 
-	fmt.Fprintf(os.Stderr, "cryptship-server listening on %s (attestation required: %v)\n", *addr, *requireAtt)
+	fmt.Fprintf(os.Stderr, "cryptship-server listening on %s (attestation required: %v, seats enforced: %v)\n", *addr, *requireAtt, *enforceSeats)
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		must(err, "serve")
 	}
