@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -132,12 +133,25 @@ func run(cfg config) error {
 		return fmt.Errorf("extract payload: %w", err)
 	}
 	crypto.Wipe(tarBytes)
-	writeManifest(cfg.extractDir, lic.Claims)
+	if err := writeManifest(cfg.extractDir, lic.Claims); err != nil {
+		fmt.Fprintln(os.Stderr, "cryptship-loader: WARNING: manifest not written:", err)
+	}
 
 	// 6. Hand off to the real application.
 	return execApp(cfg, lic.Claims)
 }
 
+// extractMarker is created in the extract dir before anything is extracted,
+// so a later run knows the directory is cryptship's to empty.
+const extractMarker = ".cryptship-extract-dir"
+
+// manifestName is the per-license watermark written after extraction.
+const manifestName = ".cryptship-manifest.json"
+
+// prepareDir empties the extract dir for a fresh extraction. It only deletes
+// the contents of a directory that is empty or that an earlier run marked as
+// an extract dir, so a mistyped CRYPTSHIP_EXTRACT (say, a home directory)
+// fails instead of being wiped.
 func prepareDir(dir string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -153,13 +167,28 @@ func prepareDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	if len(entries) > 0 && !hasEntry(entries, extractMarker) && !hasEntry(entries, manifestName) {
+		return fmt.Errorf("refusing to empty extract dir %s: it is not empty and was not created by cryptship-loader (no %s); point CRYPTSHIP_EXTRACT at an empty directory", abs, extractMarker)
+	}
 	// Empty the dir without removing it — it may be the tmpfs mount point.
 	for _, e := range entries {
 		if err := os.RemoveAll(filepath.Join(abs, e.Name())); err != nil {
 			return fmt.Errorf("clean extract dir: %w", err)
 		}
 	}
-	return os.Chmod(abs, 0o700)
+	if err := os.Chmod(abs, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(abs, extractMarker), nil, 0o400)
+}
+
+func hasEntry(entries []os.DirEntry, name string) bool {
+	for _, e := range entries {
+		if e.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 func execApp(cfg config, c license.Claims) error {
@@ -188,12 +217,42 @@ func execApp(cfg config, c license.Claims) error {
 }
 
 // writeManifest drops a per-license marker into the extracted tree so a leaked
-// running instance names its licensee. Traceability aid, not prevention.
-func writeManifest(dir string, c license.Claims) {
-	m := fmt.Sprintf(`{"license_id":%q,"customer":%q,"product":%q,"payload_id":%q,"started_at":%d}`+"\n",
-		c.LicenseID, c.CustomerID, c.Product, c.PayloadID, time.Now().Unix())
-	_ = os.WriteFile(filepath.Join(dir, ".cryptship-manifest.json"), []byte(m), 0o400)
+// running instance names its licensee. Traceability aid, not prevention. It
+// is created with O_EXCL, so it never follows or overwrites a path the
+// payload put there.
+func writeManifest(dir string, c license.Claims) error {
+	m, err := json.Marshal(struct {
+		LicenseID string `json:"license_id"`
+		Customer  string `json:"customer"`
+		Product   string `json:"product"`
+		PayloadID string `json:"payload_id"`
+		StartedAt int64  `json:"started_at"`
+	}{c.LicenseID, c.CustomerID, c.Product, c.PayloadID, time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, manifestName), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(m, '\n'))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
+
+// stateDir is where the loader keeps revocation-grace and clock state.
+func stateDir() string { return env("CRYPTSHIP_STATE_DIR", "/var/lib/cryptship") }
+
+// stateFile names a per-license state file in the state dir.
+func stateFile(kind, licenseID string) string {
+	return filepath.Join(stateDir(), kind+"-"+escapeID(licenseID))
+}
+
+// escapeID makes a license id safe as one path component: "/" is escaped, so
+// an id cannot point a state file outside the state dir.
+func escapeID(licenseID string) string { return url.PathEscape(licenseID) }
 
 // enforceRevocation performs the optional revocation check and applies the
 // operator's failure policy (CRYPTSHIP_REVOCATION): "open" (default, run on
@@ -204,7 +263,7 @@ func enforceRevocation(lic *license.License) error {
 		return nil
 	}
 	mode := env("CRYPTSHIP_REVOCATION", "open")
-	stateFile := filepath.Join(env("CRYPTSHIP_STATE_DIR", "/var/lib/cryptship"), "revocation-"+lic.Claims.LicenseID)
+	stateFile := stateFile("revocation", lic.Claims.LicenseID)
 
 	revoked, err := checkRevocation(lic)
 	if err == nil {
@@ -221,7 +280,10 @@ func enforceRevocation(lic *license.License) error {
 	case strings.HasPrefix(mode, "grace:"):
 		if d, perr := time.ParseDuration(strings.TrimPrefix(mode, "grace:")); perr == nil {
 			if b, rerr := os.ReadFile(stateFile); rerr == nil {
+				// A last-success time in the future (clock set back, or a
+				// hand-edited file) does not count as within grace.
 				if last, lerr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); lerr == nil &&
+					last <= time.Now().Unix()+license.ClockSkew &&
 					time.Since(time.Unix(last, 0)) <= d {
 					fmt.Fprintln(os.Stderr, "cryptship-loader: revocation check failed, within grace:", err)
 					return nil
