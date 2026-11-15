@@ -140,14 +140,20 @@ image  ──> loader + payload.enc + license.json + vendor.pub   (no source, no
                 (signed, nonce-bound reply)                -> fail closed if unreachable
       attested: verified attester evidence gates the key (no production
                 verifier yet; the server refuses --require-attestation)
-6. OpenPayload(content_key, payload.enc, payload_id)      -> AEAD; fail closed
-7. untar into CRYPTSHIP_EXTRACT (should be tmpfs)
-8. exec the app (args after `--`), app becomes PID 1
+6. clock-rollback check (licenses with not_after): refuse if now is more than
+   24h behind the latest start recorded in CRYPTSHIP_STATE_DIR. The record is
+   sealed under a key derived from the content key; deleting it resets the
+   check, so it is best effort
+7. OpenPayload(content_key, payload.enc, payload_id)      -> AEAD; fail closed
+8. untar into CRYPTSHIP_EXTRACT (should be tmpfs; only an empty dir or one an
+   earlier run marked is emptied first)
+9. exec the app (args after `--`), app becomes PID 1
 ```
 
 Runtime config (env): `CRYPTSHIP_LICENSE`, `CRYPTSHIP_PAYLOAD`,
 `CRYPTSHIP_PUBKEY`, `CRYPTSHIP_EXTRACT`, `CRYPTSHIP_REVOCATION`
-(open | closed | grace:<duration>), `CRYPTSHIP_STATE_DIR` (revocation state) and
+(open | closed | grace:<duration>), `CRYPTSHIP_STATE_DIR` (revocation and clock
+state) and
 `CRYPTSHIP_REQUIRE_TMPFS` (refuse to run if the extract dir is not tmpfs). Put the extract dir on tmpfs:
 `docker run --tmpfs /run/cryptship` or k8s `emptyDir { medium: Memory }`.
 
