@@ -162,28 +162,50 @@ func TestAppUserValidation(t *testing.T) {
 	}
 }
 
+// buildArgEchoer compiles a minimal static ELF that prints os.Args[1]. It
+// ignores argv[0], so it runs correctly from a memfd regardless of the exe name.
+func buildArgEchoer(t *testing.T, out string) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "main.go")
+	const code = `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	if len(os.Args) > 1 {
+		fmt.Println(os.Args[1])
+	}
+}
+`
+	if err := os.WriteFile(src, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", out, src)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build arg-echoer: %v\n%s", err, b)
+	}
+}
+
 // CRYPTSHIP_EXEC_MEMFD runs a single ELF binary from memory: nothing is
 // extracted, and the extract dir is never created.
 func TestExecMemfd(t *testing.T) {
 	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
 		t.Skip("memfd mode is Linux amd64/arm64 only")
 	}
-	echo, err := exec.LookPath("echo")
-	if err != nil {
-		t.Skip("no echo binary")
-	}
-	real, _ := filepath.EvalSymlinks(echo)
-	bin, err := os.ReadFile(real)
-	if err != nil {
-		t.Fatal(err)
-	}
 	app := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(app, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(app, "bin", "tool"), bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// A tiny, self-contained ELF that echoes its first argument. Built here
+	// rather than borrowing the system `echo`: some echo / multi-call binaries
+	// reject a mismatched argv[0] when run from a memfd (argv[0]="tool" vs the
+	// exe path "/memfd:cryptship-app"), which made this test fail on some
+	// runners while passing on others.
+	buildArgEchoer(t, filepath.Join(app, "bin", "tool"))
 	if err := os.WriteFile(filepath.Join(app, "script.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
