@@ -23,8 +23,11 @@ type Provider interface {
 var (
 	// ErrNotBound means no wrapped key could be unwrapped on this machine.
 	ErrNotBound = errors.New("keyprovider: not bound to the license")
-	// ErrRevoked means a server declined to release the key.
+	// ErrRevoked means the server reported the license revoked (410 Gone).
 	ErrRevoked = errors.New("keyprovider: license revoked by server")
+	// ErrDenied means the server refused to release the key for another
+	// reason (403 Forbidden), such as rejected attestation evidence.
+	ErrDenied = errors.New("keyprovider: server refused to release the key (e.g. attestation rejected)")
 )
 
 // Select returns the first provider that handles the license's binding policy.

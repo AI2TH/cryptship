@@ -85,8 +85,10 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
-	case http.StatusGone, http.StatusForbidden:
+	case http.StatusGone:
 		return nil, ErrRevoked
+	case http.StatusForbidden:
+		return nil, ErrDenied
 	default:
 		return nil, fmt.Errorf("online: server returned %s", resp.Status)
 	}

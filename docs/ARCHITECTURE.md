@@ -169,7 +169,7 @@ state) and
   the loader POSTs a nonce; the server returns the per-license secret (derived
   from a master secret via HKDF) signed with the vendor key and echoing the
   nonce. The loader verifies and unwraps. Revocation is immediate — the server
-  declines (410/403). Reference server: `cmd/cryptship-server`; demo:
+  declines (410 revoked; 403 attestation rejected). Reference server: `cmd/cryptship-server`; demo:
   `scripts/demo-online.sh`.
 - **attested** — like online, but the key broker releases the secret only after
   verifying TEE attestation evidence the loader attaches (via an `Attester`).
