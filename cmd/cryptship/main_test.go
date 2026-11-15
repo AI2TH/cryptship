@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/AI2TH/cryptship/pkg/crypto"
@@ -67,5 +69,22 @@ func TestWrapIntoNoneAndOnline(t *testing.T) {
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMasterKeyRefusesOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "master.key")
+	if err := cmdMasterKey([]string{"--out", path}); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := os.ReadFile(path)
+	if err := cmdMasterKey([]string{"--out", path}); err == nil {
+		t.Fatal("master-key overwrote an existing key without --force")
+	}
+	if again, _ := os.ReadFile(path); !bytes.Equal(first, again) {
+		t.Fatal("existing master key changed")
+	}
+	if err := cmdMasterKey([]string{"--out", path, "--force"}); err != nil {
+		t.Fatalf("--force: %v", err)
 	}
 }

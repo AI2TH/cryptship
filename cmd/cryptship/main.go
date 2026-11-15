@@ -64,7 +64,7 @@ func usage() {
 
 usage:
   cryptship keygen       --out-priv vendor.key --out-pub vendor.pub [--key-id v1] [--force]
-  cryptship master-key   --out master.key
+  cryptship master-key   --out master.key [--force]
   cryptship fingerprint  [--all]
   cryptship pack         --in APPDIR --out payload.enc [--key-out content.key] [--transform-cmd CMD]
   cryptship issue        --priv vendor.key --content-key content.key --meta payload.json \
@@ -109,7 +109,15 @@ func cmdKeygen(args []string) error {
 func cmdMasterKey(args []string) error {
 	fs := flag.NewFlagSet("master-key", flag.ExitOnError)
 	out := fs.String("out", "master.key", "output path for the server master secret")
+	force := fs.Bool("force", false, "overwrite an existing master key (every online/attested license issued under it stops working)")
 	fs.Parse(args)
+	// Overwriting the master secret silently strands every license issued
+	// under it, so require --force as keygen does.
+	if !*force {
+		if _, err := os.Stat(*out); err == nil {
+			return fmt.Errorf("master-key: %s already exists; replacing it breaks every online/attested license issued with it (use --force to overwrite)", *out)
+		}
+	}
 	k, err := crypto.RandomKey()
 	if err != nil {
 		return err
