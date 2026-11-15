@@ -246,3 +246,42 @@ func checkLinkTarget(name, linkname string) error {
 	}
 	return nil
 }
+
+// ReadFile returns the contents of the regular-file entry called name from a
+// tar archive, without writing anything to disk. Symlinks are not followed: a
+// symlink, directory or missing entry is an error, as is an entry larger than
+// maxBytes.
+func ReadFile(data []byte, name string, maxBytes int64) ([]byte, error) {
+	want, err := cleanEntry(name)
+	if err != nil {
+		return nil, err
+	}
+	tr := tar.NewReader(bytes.NewReader(data))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("archive: no entry %q", name)
+		}
+		if err != nil {
+			return nil, err
+		}
+		got, err := cleanEntry(hdr.Name)
+		if err != nil {
+			return nil, err
+		}
+		if got != want {
+			continue
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			return nil, fmt.Errorf("archive: entry %q is not a regular file", name)
+		}
+		if hdr.Size < 0 || hdr.Size > maxBytes {
+			return nil, fmt.Errorf("archive: %q (%d bytes) exceeds limit of %d bytes", name, hdr.Size, maxBytes)
+		}
+		b := make([]byte, hdr.Size)
+		if _, err := io.ReadFull(tr, b); err != nil {
+			return nil, err
+		}
+		return b, nil
+	}
+}

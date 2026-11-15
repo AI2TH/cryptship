@@ -6,6 +6,30 @@ GitHub releases.
 
 ## [Unreleased]
 
+### Added (IMPROVEMENTS.md items)
+- **Attested protocol:** server-issued single-use challenge (`POST /v1/challenge`),
+  evidence over `AttestationBinding(license, challenge, ephemeral key)`, and the
+  secret returned sealed to the ephemeral X25519 key. `online.AttestationNonce`
+  is replaced by `online.AttestationBinding`.
+- **Policy-bound server secrets:** `binding.secret_v` 2 (default for new
+  licenses) derives the secret per binding policy, so an online server cannot
+  release an attested secret. `issue --server-secret-version 0` for old loaders;
+  `cryptship-server --no-legacy-secrets` once all licenses are reissued.
+- **Seats:** `issue --max-machines N` + `cryptship-server --enforce-seats`
+  (`--seat-lease`, `--seats-file`, `--license-keys`).
+- **Binding-derived state key** (`crypto.DeriveStateKey`, `keyprovider.Unlocker`)
+  seals the clock-rollback and revocation-grace records; the revocation-grace
+  record is no longer a plain-text timestamp.
+- **Opt-in, off by default:** `CRYPTSHIP_APP_USER` (separate-uid extraction and
+  privilege drop) and `CRYPTSHIP_EXEC_MEMFD` (single ELF binary from a memfd);
+  `pkg/harden` and `helpers/python/cryptship_harden.py`.
+- `issue --expires-end-of-day`; `--expires` with `--days` is now an error.
+- 502/503/504 count as an outage for `CRYPTSHIP_ONLINE_GRACE`.
+- Fuzz tests (license parsing, tar extraction, response decoders, challenges).
+
+### Fixed
+- `scripts/check-mermaid.sh` docker fallback on Linux (temp dir was 0700).
+
 ### Security / fixed (from a full code review)
 - **Online grace cache reworked.** It now caches the **content key** instead of
   the per-license binding secret (no portable license-wide credential), and the

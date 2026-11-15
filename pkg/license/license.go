@@ -58,7 +58,18 @@ type Binding struct {
 	Server string `json:"server,omitempty"`
 	// ProviderData is opaque, provider-defined bytes (e.g. attestation policy id).
 	ProviderData []byte `json:"provider_data,omitempty"`
+	// SecretVersion selects how the server derives the binding secret
+	// (online, attested). 0 (absent) is the legacy derivation from the master
+	// secret and license id alone; SecretVersion2 also binds the policy, so
+	// an online server cannot produce an attested license's secret.
+	SecretVersion int `json:"secret_v,omitempty"`
 }
+
+// Server secret derivation versions (Binding.SecretVersion).
+const (
+	SecretVersionLegacy = 0
+	SecretVersion2      = 2
+)
 
 // Claims is the signed portion of a license. Field order is significant: the
 // v2 KEK context hashes the encoding/json form of this struct, so fields must
@@ -184,6 +195,9 @@ func (c Claims) Validate() error {
 	if c.NotAfter != 0 && c.NotAfter <= c.IssuedAt {
 		return errors.New("cryptship/license: not_after <= issued_at")
 	}
+	if c.Binding.SecretVersion != SecretVersionLegacy && c.Binding.Policy != BindOnline && c.Binding.Policy != BindAttested {
+		return errors.New("cryptship/license: binding.secret_v applies only to online/attested binding")
+	}
 	switch c.Binding.Policy {
 	case BindNone:
 		if len(c.UnboundSecret) != 32 || len(c.WrappedKeys) != 1 {
@@ -197,6 +211,9 @@ func (c Claims) Validate() error {
 		if c.Binding.Server == "" {
 			return errors.New("cryptship/license: online/attested binding needs binding.server")
 		}
+		if v := c.Binding.SecretVersion; v != SecretVersionLegacy && v != SecretVersion2 {
+			return fmt.Errorf("cryptship/license: unsupported binding.secret_v %d", v)
+		}
 		if len(c.UnboundSecret) != 0 || len(c.WrappedKeys) < 1 {
 			return errors.New("cryptship/license: online/attested binding needs wrapped keys and no unbound_secret")
 		}
@@ -208,7 +225,20 @@ func (c Claims) Validate() error {
 
 // Marshal serialises a license for storage. It must stay compact: the signature
 // covers ClaimsRaw byte-for-byte, and Sign produces compact bytes.
-func (l *License) Marshal() ([]byte, error) { return json.Marshal(l) }
+//
+// HTML escaping is off: encoding/json would otherwise rewrite '&', '<' and
+// '>' inside the raw claims as \u0026 and so on, changing the signed bytes
+// of a license whose claims contain them literally (found by FuzzParse).
+// Licenses from Sign are unaffected, since their claims are already escaped.
+func (l *License) Marshal() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(l); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
 
 // Parse decodes a license and its claims view.
 func Parse(b []byte) (*License, error) {

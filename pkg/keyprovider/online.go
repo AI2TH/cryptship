@@ -3,7 +3,6 @@ package keyprovider
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -52,11 +51,16 @@ func (Online) Handles(p license.BindingPolicy) bool { return p == license.BindOn
 
 // ContentKey implements Provider.
 func (o Online) ContentKey(ctx context.Context, lic *license.License) ([]byte, error) {
+	return contentKeyOnly(o.Unlock(ctx, lic))
+}
+
+// Unlock implements Unlocker.
+func (o Online) Unlock(ctx context.Context, lic *license.License) (Unlocked, error) {
 	var g *graceConfig
 	if o.CacheDir != "" && o.Grace > 0 {
 		g = &graceConfig{dir: o.CacheDir, window: o.Grace}
 	}
-	return fetchAndUnwrap(ctx, o.Keys, o.Client, lic, nil, g)
+	return fetchAndUnwrap(ctx, o.Keys, o.Client, lic, g)
 }
 
 // graceConfig configures the outage cache (online only).
@@ -65,51 +69,81 @@ type graceConfig struct {
 	window time.Duration
 }
 
-// fetchAndUnwrap runs the request / verify / unwrap flow shared by the online
-// and attested providers. evidence is nil for online; for attested it returns
-// evidence bound to the request nonce. grace is non-nil only for online.
-func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, evidence func(nonce []byte) ([]byte, error), grace *graceConfig) ([]byte, error) {
+// fetchAndUnwrap runs the online request / verify / unwrap flow. grace is nil
+// when the outage cache is disabled.
+func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient, lic *license.License, grace *graceConfig) (Unlocked, error) {
 	c := lic.Claims
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return Unlocked{}, err
+	}
+	m, _ := machine.ID()
+	respBody, err := postJSON(ctx, client, c, "/v1/key", online.KeyRequest{
+		LicenseID: c.LicenseID, Machine: m, Nonce: nonce,
+		Policy: string(c.Binding.Policy), SecretVersion: c.Binding.SecretVersion,
+		License: licenseJSON(lic),
+	})
+	if err != nil {
+		// Server unreachable: ride out the outage with the cached content key, if any.
+		var ue *unreachableError
+		if grace != nil && errors.As(err, &ue) {
+			if u, gerr := graceUnwrap(grace, c); gerr == nil {
+				fmt.Fprintln(os.Stderr, "cryptship: license server unreachable, using grace cache:", err)
+				return u, nil
+			} else if !errors.Is(gerr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "cryptship: grace cache present but unusable:", gerr)
+			}
+		}
+		return Unlocked{}, err
+	}
+	kr, err := online.VerifyKeyResponse(respBody, keys, c.LicenseID, nonce, time.Now())
+	if err != nil {
+		return Unlocked{}, err
+	}
+	defer crypto.Wipe(kr.Secret)
+	u, err := UnwrapKeys(c, kr.Secret)
+	if err != nil {
+		return Unlocked{}, err
+	}
+	if grace != nil {
+		// Cache the content key (and the local state key), not the
+		// per-license secret: the content key is per build and already lives
+		// in the running app's memory, and the state key only seals local
+		// state, so caching them adds no portable license-wide credential.
+		graceStore(grace, c, u, kr.NotAfter) // best effort
+	}
+	return u, nil
+}
+
+// unreachableError marks a transport failure (no answer from the server), the
+// only failure the outage grace cache may cover.
+type unreachableError struct{ err error }
+
+func (e *unreachableError) Error() string { return "online: " + e.err.Error() }
+func (e *unreachableError) Unwrap() error { return e.err }
+
+// postJSON POSTs v to the license's server at path and returns the body of a
+// 200 answer. 410 maps to ErrRevoked and 403 to ErrDenied; a transport
+// failure is an *unreachableError.
+func postJSON(ctx context.Context, client HTTPClient, c license.Claims, path string, v any) ([]byte, error) {
 	if c.Binding.Server == "" {
 		return nil, errors.New("online: license has no binding.server")
 	}
 	if client == nil {
 		return nil, errors.New("online: no HTTP client configured")
 	}
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	var attestation []byte
-	if evidence != nil {
-		var err error
-		if attestation, err = evidence(nonce); err != nil {
-			return nil, err
-		}
-	}
-	m, _ := machine.ID()
-	body, err := json.Marshal(online.KeyRequest{LicenseID: c.LicenseID, Machine: m, Nonce: nonce, Attestation: attestation})
+	body, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.Binding.Server, "/")+"/v1/key", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.Binding.Server, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := client.Do(req)
 	if err != nil {
-		// Server unreachable: ride out the outage with the cached content key, if any.
-		if grace != nil {
-			if key, gerr := graceUnwrap(grace, c); gerr == nil {
-				fmt.Fprintln(os.Stderr, "cryptship: license server unreachable, using grace cache:", err)
-				return key, nil
-			} else if !errors.Is(gerr, os.ErrNotExist) {
-				fmt.Fprintln(os.Stderr, "cryptship: grace cache present but unusable:", gerr)
-			}
-		}
-		return nil, fmt.Errorf("online: %w", err)
+		return nil, &unreachableError{err}
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -118,42 +152,32 @@ func fetchAndUnwrap(ctx context.Context, keys license.KeyRing, client HTTPClient
 		return nil, ErrRevoked
 	case http.StatusForbidden:
 		return nil, ErrDenied
+	case http.StatusConflict:
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("%w: %s", ErrSeatLimit, strings.TrimSpace(string(msg)))
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		// A proxy in front of the server reports it down: an outage.
+		return nil, &unreachableError{fmt.Errorf("server returned %s", resp.Status)}
 	default:
 		return nil, fmt.Errorf("online: server returned %s", resp.Status)
 	}
-
-	var kr online.KeyResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&kr); err != nil {
-		return nil, fmt.Errorf("online: bad response: %w", err)
-	}
-	pub, ok := keys[kr.SigningKeyID]
-	if !ok {
-		pub, ok = keys["*"]
-	}
-	if !ok {
-		return nil, fmt.Errorf("online: response signed by unknown key %q", kr.SigningKeyID)
-	}
-	if kr.LicenseID != c.LicenseID || !bytes.Equal(kr.Nonce, nonce) || len(kr.Secret) != online.SecretSize {
-		return nil, errors.New("online: response does not match request")
-	}
-	if kr.NotAfter != 0 && time.Now().Unix() > kr.NotAfter {
-		return nil, errors.New("online: response already expired")
-	}
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, online.ResponseSigningInput(kr), kr.Sig) {
-		return nil, errors.New("online: bad response signature")
-	}
-	defer crypto.Wipe(kr.Secret)
-	key, err := Unwrap(c, kr.Secret)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, online.MaxResponseBytes))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("online: read response: %w", err)
 	}
-	if grace != nil {
-		// Cache the content key, not the per-license secret: the content key is
-		// per build and already lives in the running app's memory, so caching it
-		// adds no portable license-wide credential.
-		graceStore(grace, c, key, kr.NotAfter) // best effort
+	return b, nil
+}
+
+// licenseJSON is the signed license as sent for seat enforcement.
+func licenseJSON(lic *license.License) json.RawMessage {
+	if len(lic.ClaimsRaw) == 0 {
+		return nil
 	}
-	return key, nil
+	b, err := lic.Marshal()
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // --- outage grace cache ---
@@ -209,14 +233,18 @@ func gracePath(dir, licenseID string) string {
 	return filepath.Join(dir, "online-grace-"+url.PathEscape(licenseID))
 }
 
-func graceStore(g *graceConfig, c license.Claims, contentKey []byte, serverNotAfter int64) {
+func graceStore(g *graceConfig, c license.Claims, u Unlocked, serverNotAfter int64) {
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
 		return
 	}
 	defer crypto.Wipe(kek)
 	cachedAt := time.Now().Unix()
-	sealed, err := crypto.Seal(kek, contentKey, graceAD(c.LicenseID, cachedAt, serverNotAfter))
+	// The sealed value is content key || state key (64 bytes); a 32-byte
+	// record from an older loader holds the content key only.
+	pt := append(append([]byte{}, u.ContentKey...), u.StateKey...)
+	defer crypto.Wipe(pt)
+	sealed, err := crypto.Seal(kek, pt, graceAD(c.LicenseID, cachedAt, serverNotAfter))
 	if err != nil {
 		return
 	}
@@ -230,38 +258,46 @@ func graceStore(g *graceConfig, c license.Claims, contentKey []byte, serverNotAf
 	_ = os.WriteFile(gracePath(g.dir, c.LicenseID), rec, 0o600)
 }
 
-// graceUnwrap returns the cached content key if the cache is present, within the
+// graceUnwrap returns the cached keys if the cache is present, within the
 // local window AND the server-stated NotAfter, not clock-rolled-back, and its
 // authenticated timestamps are intact.
-func graceUnwrap(g *graceConfig, c license.Claims) ([]byte, error) {
+func graceUnwrap(g *graceConfig, c license.Claims) (Unlocked, error) {
 	b, err := os.ReadFile(gracePath(g.dir, c.LicenseID))
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	var rec graceRecord
 	if err := json.Unmarshal(b, &rec); err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	now := time.Now().Unix()
 	if rec.CachedAt > now+license.ClockSkew {
-		return nil, errors.New("grace cache: cached in the future (clock rollback)")
+		return Unlocked{}, errors.New("grace cache: cached in the future (clock rollback)")
 	}
 	if time.Since(time.Unix(rec.CachedAt, 0)) > g.window {
-		return nil, errors.New("grace cache: older than the grace window")
+		return Unlocked{}, errors.New("grace cache: older than the grace window")
 	}
 	if rec.NotAfter != 0 && now > rec.NotAfter {
-		return nil, errors.New("grace cache: past the server-stated validity")
+		return Unlocked{}, errors.New("grace cache: past the server-stated validity")
 	}
 	kek, err := graceKEK(g.dir, c.LicenseID)
 	if err != nil {
-		return nil, err
+		return Unlocked{}, err
 	}
 	defer crypto.Wipe(kek)
 	// Open also authenticates CachedAt/NotAfter via the AAD: editing them to
 	// widen the window makes this fail.
-	contentKey, err := crypto.Open(kek, rec.Sealed, graceAD(c.LicenseID, rec.CachedAt, rec.NotAfter))
+	pt, err := crypto.Open(kek, rec.Sealed, graceAD(c.LicenseID, rec.CachedAt, rec.NotAfter))
 	if err != nil {
-		return nil, fmt.Errorf("grace cache: %w (tampered, or a different machine)", err)
+		return Unlocked{}, fmt.Errorf("grace cache: %w (tampered, or a different machine)", err)
 	}
-	return contentKey, nil
+	switch len(pt) {
+	case 2 * crypto.KeySize:
+		return Unlocked{ContentKey: pt[:crypto.KeySize], StateKey: pt[crypto.KeySize:]}, nil
+	case crypto.KeySize:
+		return Unlocked{ContentKey: pt}, nil
+	default:
+		crypto.Wipe(pt)
+		return Unlocked{}, errors.New("grace cache: malformed record")
+	}
 }

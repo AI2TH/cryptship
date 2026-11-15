@@ -38,8 +38,14 @@ func wrapForTest(t *testing.T, c license.Claims, material, contentKey []byte) []
 
 // serverBoundLicense builds a license whose content key is wrapped under the KEK
 // derived from the server-held binding secret (what `cryptship issue --binding
-// online|attested` does).
+// online|attested` does), with secret version 2.
 func serverBoundLicense(t *testing.T, priv ed25519.PrivateKey, master, contentKey []byte, policy license.BindingPolicy, server string) *license.License {
+	t.Helper()
+	return serverBoundLicenseV(t, priv, master, contentKey, policy, server, license.SecretVersion2)
+}
+
+// serverBoundLicenseV is serverBoundLicense with an explicit secret version.
+func serverBoundLicenseV(t *testing.T, priv ed25519.PrivateKey, master, contentKey []byte, policy license.BindingPolicy, server string, secretVersion int) *license.License {
 	t.Helper()
 	now := time.Now().Unix()
 	c := license.Claims{
@@ -51,9 +57,9 @@ func serverBoundLicense(t *testing.T, priv ed25519.PrivateKey, master, contentKe
 		IssuedAt:     now,
 		NotAfter:     now + 3600,
 		SigningKeyID: "v1",
-		Binding:      license.Binding{Policy: policy, Server: server},
+		Binding:      license.Binding{Policy: policy, Server: server, SecretVersion: secretVersion},
 	}
-	secret, err := online.DeriveSecret(master, c.LicenseID)
+	secret, err := online.DeriveSecretFor(master, c.LicenseID, string(policy), secretVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,9 +153,9 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 		t.Fatalf("no-TEE: err = %v, want ErrNoTEE", err)
 	}
 
-	// Evidence that is not bound to this request's nonce (e.g. replayed from
-	// an earlier request) is refused by the server.
-	stale := staleAttester{bindData: online.AttestationNonce(lic.Claims.LicenseID, []byte("an-older-nonce!!"))}
+	// Evidence that is not bound to this request's challenge and ephemeral
+	// key (e.g. replayed from an earlier request) is refused by the server.
+	stale := staleAttester{bindData: online.AttestationBinding(lic.Claims.LicenseID, []byte("an-older-challenge"), make([]byte, 32))}
 	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: stale}).ContentKey(context.Background(), lic); !errors.Is(err, ErrDenied) {
 		t.Fatalf("evidence for another nonce: err = %v, want ErrDenied", err)
 	}
@@ -162,4 +168,40 @@ type staleAttester struct{ bindData []byte }
 func (staleAttester) Name() string { return "stale" }
 func (s staleAttester) Evidence(ctx context.Context, _ []byte) ([]byte, error) {
 	return attesttest.Attester{}.Evidence(ctx, s.bindData)
+}
+
+// The state key comes from the binding material: each fingerprint of a pool
+// license gives a different one, none equals the content key, and it is
+// stable across starts.
+func TestStateKeyIsBindingDerived(t *testing.T) {
+	contentKey, _ := crypto.RandomKey()
+	now := time.Now().Unix()
+	c := license.Claims{
+		Version: license.FormatVersion, LicenseID: "lic_p", Product: "p", PayloadID: "b",
+		IssuedAt: now, NotAfter: now + 3600, Binding: license.Binding{Policy: license.BindPool, Max: 2},
+	}
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, []byte("fp-a"), contentKey), wrapForTest(t, c, []byte("fp-b"), contentKey)}
+	a, err := UnwrapKeys(c, []byte("fp-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := UnwrapKeys(c, []byte("fp-a"))
+	b, _ := UnwrapKeys(c, []byte("fp-b"))
+	if !bytes.Equal(a.ContentKey, contentKey) || !bytes.Equal(b.ContentKey, contentKey) {
+		t.Fatal("content key mismatch")
+	}
+	if len(a.StateKey) != 32 || bytes.Equal(a.StateKey, b.StateKey) || bytes.Equal(a.StateKey, contentKey) || !bytes.Equal(a.StateKey, a2.StateKey) {
+		t.Fatal("state key must be 32 bytes, per binding, stable, and not the content key")
+	}
+	// Another license with the same content key and fingerprint gets another state key.
+	c2 := c
+	c2.LicenseID = "lic_q"
+	c2.WrappedKeys = [][]byte{wrapForTest(t, c2, []byte("fp-a"), contentKey)}
+	other, _ := UnwrapKeys(c2, []byte("fp-a"))
+	if bytes.Equal(other.StateKey, a.StateKey) {
+		t.Fatal("state key shared across licenses")
+	}
+	if _, err := UnwrapKeys(c, []byte("fp-x")); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unbound fingerprint: %v", err)
+	}
 }

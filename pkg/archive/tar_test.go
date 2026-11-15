@@ -16,7 +16,7 @@ type entry struct {
 	mode       int64
 }
 
-func buildTar(t *testing.T, entries []entry) []byte {
+func buildTar(t testing.TB, entries []entry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -276,5 +276,35 @@ func TestTarDirRejectsWhatUntarRefuses(t *testing.T) {
 				t.Fatalf("TarDir accepted symlink -> %s", link)
 			}
 		})
+	}
+}
+
+func TestReadFile(t *testing.T) {
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "bin", "app"), []byte("ELF..."), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("bin/app", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := TarDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"bin/app", "./bin/app", "bin//app"} {
+		if b, err := ReadFile(data, name, 1<<20); err != nil || string(b) != "ELF..." {
+			t.Fatalf("%s: %q %v", name, b, err)
+		}
+	}
+	for _, name := range []string{"link", "bin", "missing", "../bin/app", "/bin/app"} {
+		if _, err := ReadFile(data, name, 1<<20); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	if _, err := ReadFile(data, "bin/app", 3); err == nil {
+		t.Error("size limit not enforced")
 	}
 }

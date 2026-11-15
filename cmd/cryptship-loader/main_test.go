@@ -1,13 +1,9 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
-	"time"
 
 	"github.com/AI2TH/cryptship/pkg/license"
 )
@@ -80,35 +76,5 @@ func TestStateFileStaysInStateDir(t *testing.T) {
 	}
 	if got := stateFile("revocation", "lic_abc"); got != filepath.Join(dir, "revocation-lic_abc") {
 		t.Errorf("plain id renamed: %s", got)
-	}
-}
-
-// grace: a last-success time in the future is not "within grace".
-func TestRevocationGraceIgnoresFutureTimestamp(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer ts.Close()
-	dir := t.TempDir()
-	t.Setenv("CRYPTSHIP_STATE_DIR", dir)
-	t.Setenv("CRYPTSHIP_REVOCATION", "grace:1h")
-	lic := &license.License{Claims: license.Claims{LicenseID: "lic_g", RevocationURL: ts.URL}}
-	write := func(ts int64) {
-		if err := os.WriteFile(stateFile("revocation", "lic_g"), []byte(strconv.FormatInt(ts, 10)), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	write(time.Now().Add(-10 * time.Minute).Unix())
-	if err := enforceRevocation(lic, license.KeyRing{}); err != nil {
-		t.Fatalf("recent success should be within grace: %v", err)
-	}
-	write(time.Now().Add(-2 * time.Hour).Unix())
-	if err := enforceRevocation(lic, license.KeyRing{}); err == nil {
-		t.Fatal("old success accepted as within grace")
-	}
-	write(time.Now().Add(365 * 24 * time.Hour).Unix())
-	if err := enforceRevocation(lic, license.KeyRing{}); err == nil {
-		t.Fatal("future success timestamp accepted as within grace")
 	}
 }

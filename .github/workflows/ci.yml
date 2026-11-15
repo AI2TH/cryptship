@@ -38,6 +38,17 @@ jobs:
       - name: test
         run: go test -race ./...
 
+      - name: fuzz (10s per target)
+        run: |
+          for t in FuzzUntar:./pkg/archive FuzzReadFile:./pkg/archive FuzzParse:./pkg/license \
+                   FuzzVerifyKeyResponse:./pkg/online FuzzVerifyCheckResponse:./pkg/online \
+                   FuzzVerifyAttestedKeyResponse:./pkg/online FuzzCheckChallenge:./pkg/online; do
+            go test -run='^$' -fuzz="^${t%%:*}\$" -fuzztime=10s "${t#*:}"
+          done
+
+      - name: test Python helper
+        run: python3 -m unittest discover -s helpers/python -v
+
   docs-diagrams:
     runs-on: ubuntu-latest
     steps:

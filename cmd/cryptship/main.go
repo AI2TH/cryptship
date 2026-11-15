@@ -229,7 +229,8 @@ func cmdIssue(args []string) error {
 	customer := fs.String("customer", "", "customer id/name (required)")
 	product := fs.String("product", "", "product name (required)")
 	edition := fs.String("edition", "", "edition/tier")
-	expires := fs.String("expires", "", "expiry date YYYY-MM-DD")
+	expires := fs.String("expires", "", "expiry date YYYY-MM-DD: the license expires at 00:00:00 UTC that day (see --expires-end-of-day)")
+	endOfDay := fs.Bool("expires-end-of-day", false, "with --expires: stay valid through 23:59:59 UTC of that date")
 	days := fs.Int("days", 0, "expiry as N days from now (alternative to --expires)")
 	binding := fs.String("binding", "", "binding policy: none|strict|pool|online|attested (required)")
 	server := fs.String("server", "", "license/key-broker server URL (online/attested binding)")
@@ -237,6 +238,8 @@ func cmdIssue(args []string) error {
 	revURL := fs.String("revocation-url", "", "optional revocation check URL")
 	out := fs.String("out", "license.json", "output license path")
 	licVersion := fs.Int("license-version", license.FormatVersion, "license format version: 2 binds every claim into the KEK; 1 only for loaders older than v2 support")
+	maxMachines := fs.Int("max-machines", 0, "online/attested: most distinct machines that may use the license at once (enforced by cryptship-server --enforce-seats; 0 = no limit)")
+	secretVersion := fs.Int("server-secret-version", license.SecretVersion2, "online/attested: server secret derivation; 2 binds the policy (an online server cannot release attested secrets), 0 = legacy, for loaders and servers that predate it")
 	var fps stringList
 	fs.Var(&fps, "fingerprint", "bound machine fingerprint (repeatable; strict=1, pool>=1)")
 	var ents stringList
@@ -282,7 +285,7 @@ func cmdIssue(args []string) error {
 		}
 		lid = "lic_" + h
 	}
-	notAfter, err := resolveExpiry(*expires, *days)
+	notAfter, err := resolveExpiry(*expires, *days, *endOfDay)
 	if err != nil {
 		return err
 	}
@@ -313,7 +316,17 @@ func cmdIssue(args []string) error {
 		SigningKeyID:  *keyID,
 	}
 
-	if err := wrapInto(&claims, license.BindingPolicy(*binding), contentKey, fps, *server, master); err != nil {
+	if *secretVersion != license.SecretVersionLegacy && *secretVersion != license.SecretVersion2 {
+		return fmt.Errorf("issue: --server-secret-version must be %d or %d", license.SecretVersionLegacy, license.SecretVersion2)
+	}
+	if *maxMachines < 0 {
+		return errors.New("issue: --max-machines must be >= 0")
+	}
+	if *maxMachines > 0 && *binding != string(license.BindOnline) && *binding != string(license.BindAttested) {
+		return errors.New("issue: --max-machines applies to online/attested binding (strict/pool are limited by their fingerprints)")
+	}
+	sb := serverBinding{URL: *server, Master: master, SecretVersion: *secretVersion, MaxMachines: *maxMachines}
+	if err := wrapInto(&claims, license.BindingPolicy(*binding), contentKey, fps, sb); err != nil {
 		return err
 	}
 	if err := claims.Validate(); err != nil {
@@ -333,12 +346,20 @@ func cmdIssue(args []string) error {
 	}
 	fmt.Printf("issued %s for %s/%s (binding=%s) -> %s\n", lid, *customer, *product, *binding, *out)
 	if notAfter != 0 {
-		fmt.Printf("expires: %s\n", time.Unix(notAfter, 0).UTC().Format("2006-01-02"))
+		fmt.Printf("expires: %s\n", time.Unix(notAfter, 0).UTC().Format(time.RFC3339))
 	}
 	return nil
 }
 
-func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte, fps []string, server string, master []byte) error {
+// serverBinding is what an online/attested license needs from the issuer.
+type serverBinding struct {
+	URL           string
+	Master        []byte
+	SecretVersion int
+	MaxMachines   int // binding.max: seats, enforced by the server
+}
+
+func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte, fps []string, sb serverBinding) error {
 	switch policy {
 	case license.BindNone:
 		secret, err := crypto.RandomKey()
@@ -364,14 +385,17 @@ func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte
 		return wrapPerFingerprint(c, contentKey, fps)
 
 	case license.BindOnline, license.BindAttested:
-		if server == "" || len(master) == 0 {
+		if sb.URL == "" || len(sb.Master) == 0 {
 			return errors.New("issue: online/attested binding needs --server and --server-master-key")
 		}
-		c.Binding = license.Binding{Policy: policy, Server: server}
-		secret, err := online.DeriveSecret(master, c.LicenseID)
+		// secret_v and max are claims (in the v2 KEK context), so they are
+		// set before wrapping.
+		c.Binding = license.Binding{Policy: policy, Server: sb.URL, SecretVersion: sb.SecretVersion, Max: sb.MaxMachines}
+		secret, err := online.DeriveSecretFor(sb.Master, c.LicenseID, string(policy), sb.SecretVersion)
 		if err != nil {
 			return err
 		}
+		defer crypto.Wipe(secret)
 		return wrapWith(c, secret, contentKey)
 
 	default:
@@ -476,11 +500,23 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-func resolveExpiry(date string, days int) (int64, error) {
+// resolveExpiry turns --expires / --days into not_after (unix seconds, UTC).
+// --expires D alone means 00:00:00 UTC on D; with endOfDay, 23:59:59 UTC on
+// D (the license is valid while now <= not_after).
+func resolveExpiry(date string, days int, endOfDay bool) (int64, error) {
+	if endOfDay && date == "" {
+		return 0, errors.New("issue: --expires-end-of-day needs --expires")
+	}
+	if date != "" && days > 0 {
+		return 0, errors.New("issue: give --expires or --days, not both")
+	}
 	if date != "" {
 		t, err := time.Parse("2006-01-02", date)
 		if err != nil {
 			return 0, fmt.Errorf("issue: bad --expires: %w", err)
+		}
+		if endOfDay {
+			t = t.Add(24*time.Hour - time.Second)
 		}
 		return t.Unix(), nil
 	}

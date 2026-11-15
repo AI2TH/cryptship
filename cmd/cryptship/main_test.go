@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AI2TH/cryptship/pkg/crypto"
 	"github.com/AI2TH/cryptship/pkg/keyprovider"
 	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 // Each fingerprint of a pool license must unwrap the content key after a
@@ -24,7 +26,7 @@ func TestWrapIntoPoolEveryFingerprintUnwraps(t *testing.T) {
 
 	for _, v := range []int{license.FormatVersion1, license.FormatVersion2} {
 		c := license.Claims{Version: v, LicenseID: "lic_pool", CustomerID: "acme", Product: "w", PayloadID: "p", SigningKeyID: "v1"}
-		if err := wrapInto(&c, license.BindPool, contentKey, fps, "", nil); err != nil {
+		if err := wrapInto(&c, license.BindPool, contentKey, fps, serverBinding{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := c.Validate(); err != nil {
@@ -56,19 +58,45 @@ func TestWrapIntoNoneAndOnline(t *testing.T) {
 	master, _ := crypto.RandomKey()
 
 	c := license.Claims{Version: license.FormatVersion, LicenseID: "lic_none", PayloadID: "p"}
-	if err := wrapInto(&c, license.BindNone, contentKey, nil, "", nil); err != nil {
+	if err := wrapInto(&c, license.BindNone, contentKey, nil, serverBinding{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := keyprovider.Unwrap(c, c.UnboundSecret); err != nil || !bytes.Equal(got, contentKey) {
 		t.Fatalf("none: err = %v", err)
 	}
 
-	c = license.Claims{Version: license.FormatVersion, LicenseID: "lic_online", PayloadID: "p"}
-	if err := wrapInto(&c, license.BindOnline, contentKey, nil, "https://keys.example", master); err != nil {
-		t.Fatal(err)
+	for _, policy := range []license.BindingPolicy{license.BindOnline, license.BindAttested} {
+		for _, sv := range []int{license.SecretVersionLegacy, license.SecretVersion2} {
+			c = license.Claims{Version: license.FormatVersion, LicenseID: "lic_srv", PayloadID: "p"}
+			if err := wrapInto(&c, policy, contentKey, nil, serverBinding{URL: "https://keys.example", Master: master, SecretVersion: sv, MaxMachines: 3}); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if c.Binding.SecretVersion != sv || c.Binding.Max != 3 {
+				t.Fatalf("%s: secret_v = %d, want %d", policy, c.Binding.SecretVersion, sv)
+			}
+			want, _ := online.DeriveSecretFor(master, "lic_srv", string(policy), sv)
+			if got, err := keyprovider.Unwrap(c, want); err != nil || !bytes.Equal(got, contentKey) {
+				t.Fatalf("%s v%d: err = %v", policy, sv, err)
+			}
+			// Under v2 the other policy's secret does not unwrap.
+			if sv == license.SecretVersion2 {
+				otherPolicy := license.BindOnline
+				if policy == license.BindOnline {
+					otherPolicy = license.BindAttested
+				}
+				wrong, _ := online.DeriveSecretFor(master, "lic_srv", string(otherPolicy), sv)
+				if _, err := keyprovider.Unwrap(c, wrong); err == nil {
+					t.Fatalf("%s: the %s secret unwrapped it", policy, otherPolicy)
+				}
+			}
+		}
 	}
-	if err := c.Validate(); err != nil {
-		t.Fatal(err)
+	c = license.Claims{Version: license.FormatVersion, LicenseID: "lic_x", PayloadID: "p"}
+	if err := wrapInto(&c, license.BindOnline, contentKey, nil, serverBinding{URL: "https://keys.example", Master: master, SecretVersion: 7}); err == nil {
+		t.Fatal("unknown secret version accepted")
 	}
 }
 
@@ -86,5 +114,36 @@ func TestMasterKeyRefusesOverwrite(t *testing.T) {
 	}
 	if err := cmdMasterKey([]string{"--out", path, "--force"}); err != nil {
 		t.Fatalf("--force: %v", err)
+	}
+}
+
+func TestResolveExpiry(t *testing.T) {
+	start, _ := time.Parse(time.RFC3339, "2027-03-31T00:00:00Z")
+	end, _ := time.Parse(time.RFC3339, "2027-03-31T23:59:59Z")
+	if got, err := resolveExpiry("2027-03-31", 0, false); err != nil || got != start.Unix() {
+		t.Fatalf("start of day: %d %v", got, err)
+	}
+	got, err := resolveExpiry("2027-03-31", 0, true)
+	if err != nil || got != end.Unix() {
+		t.Fatalf("end of day: %d %v", got, err)
+	}
+	c := license.Claims{NotAfter: got}
+	if c.Expired(end.Unix()) {
+		t.Fatal("expired during the last second of the day")
+	}
+	if !c.Expired(end.Unix() + 1) {
+		t.Fatal("still valid at 00:00:00 the next day")
+	}
+	for _, tc := range []struct {
+		date string
+		days int
+		eod  bool
+	}{{"", 0, true}, {"2027-03-31", 5, false}, {"31/03/2027", 0, false}} {
+		if _, err := resolveExpiry(tc.date, tc.days, tc.eod); err == nil {
+			t.Errorf("%+v: accepted", tc)
+		}
+	}
+	if got, err := resolveExpiry("", 0, false); err != nil || got != 0 {
+		t.Fatalf("no expiry: %d %v", got, err)
 	}
 }
