@@ -37,12 +37,7 @@ docker build -q -f "$DEMO/Dockerfile.compiled" -t cryptship-demo-compiled "$ROOT
 
 echo
 echo "== 4. image opacity (payload is ciphertext) =="
-docker save cryptship-demo-compiled -o "$WORK/image.tar"
-rm -rf "$WORK/extracted"; mkdir -p "$WORK/extracted"; tar -xf "$WORK/image.tar" -C "$WORK/extracted"
-if grep -rai -e "$SECRET" "$WORK/extracted" >/dev/null 2>&1; then
-  echo "!! LEAK: plaintext in image"; exit 1
-fi
-echo "OK: no plaintext secret in the shipped image."
+bash "$ROOT/scripts/check-image-opacity.sh" cryptship-demo-compiled "$SECRET" "CRYPTSHIP-DEMO-SOURCE-MARKER-6f1c9a2e"
 
 echo
 echo "== 5. run it (compiled bytecode executes normally) =="
