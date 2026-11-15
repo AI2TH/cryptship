@@ -32,7 +32,8 @@ pkg/crypto      AES-256-GCM (Seal/Open), HKDF-SHA256 KEK derivation, key wrap
 pkg/license     signed claims + Ed25519 sign/verify, canonical encoding
 pkg/machine     software machine fingerprint (stable host identifiers -> hash)
 pkg/archive     tar pack + traversal-safe untar
-pkg/keyprovider Provider interface; `offline`, `online` and `attested` (mock attester) providers
+pkg/keyprovider Provider interface; `offline`, `online` and `attested` providers
+pkg/attest      attestation Verifier interface; attesttest = test-only attester/verifier
 pkg/online, pkg/licenseserver  online key protocol and the reference key server
 cmd/cryptship   vendor CLI: keygen, master-key, fingerprint, pack, issue, inspect
 cmd/cryptship-loader  image ENTRYPOINT: verify -> get key -> decrypt -> exec
@@ -44,7 +45,8 @@ cmd/cryptship-server  reference key server for the `online` provider
 ```
 vendor Ed25519 signing key  (secret, vendor-only)  -> signs licenses
 content key (random, per build)                     -> encrypts payload.enc
-KEK = HKDF(binding_material, salt = license_id)     -> wraps the content key
+KEK = HKDF(binding_material, salt = license_id,
+           info = SHA-256(binding context))         -> wraps the content key
    binding_material = machine fingerprint   (strict / pool)
                     = per-license secret     (none)
 ```
@@ -58,6 +60,29 @@ KEK = HKDF(binding_material, salt = license_id)     -> wraps the content key
   or an edited bound claim ⇒ AEAD tag failure ⇒ no plaintext. The signature and
   expiry are separate loader checks; `online` enforces expiry server-side.
 
+### Binding context (`claims.v`)
+
+The license version selects which claims the KEK is bound to. Any other value
+of `v` is refused; there is no fallback.
+
+| `v` | Context | Bound claims |
+|---|---|---|
+| 1 | `cryptship/kek-ctx/v1` NUL, then version, license id, customer id, product, payload id and policy (each NUL-terminated), issued_at and not_after (big-endian uint64) | that subset only; the rest is protected by the signature alone |
+| 2 (default) | `cryptship/kek-ctx/v2` NUL, then SHA-256 of the canonical claims | every claim except `wrapped_keys` and `unbound_secret` |
+
+The canonical claims for v2 are the Go `encoding/json` encoding of
+`license.Claims` (fields in declaration order) with `wrapped_keys` set to `null`
+and `unbound_secret` omitted. The loader recomputes it from the parsed claims,
+so editing `edition`, `entitlements`, `revocation_url`, `binding.server`,
+`binding.max`, `binding.fingerprint_hashes`, `signing_key_id`, or `v` itself
+breaks the unwrap. A golden vector in `pkg/license/context_test.go` locks the
+encoding. Because `v` is inside both contexts, rewriting a v2 license as v1
+(a downgrade to the weaker context) also fails the unwrap.
+
+`cryptship issue` writes v2 unless `--license-version 1` is given. Loaders built
+before v2 reject v2 licenses (`unsupported version`), so keep issuing v1 until
+every deployed loader is updated.
+
 ## License format
 
 Signed claims (`pkg/license.Claims`), canonically JSON-encoded, plus a detached
@@ -66,7 +91,7 @@ Ed25519 signature:
 ```jsonc
 {
   "claims": {
-    "v": 1,
+    "v": 2,                            // selects the KEK binding context
     "license_id": "lic_ab12cd34",
     "customer_id": "acme-corp",
     "product": "widget-server",
@@ -86,7 +111,9 @@ Ed25519 signature:
 }
 ```
 
-Field order in `Claims` is the canonical signing order and is append-only.
+Field order in `Claims` is the canonical signing order and is append-only. A
+field added later must be `omitempty`, or the v2 context of every existing
+license changes and none of them unwrap.
 
 ## Build-time flow (vendor)
 
@@ -111,15 +138,22 @@ image  ──> loader + payload.enc + license.json + vendor.pub   (no source, no
                 unwrap one of wrapped_keys                -> fail closed on no match
       online:   fetch the per-license binding secret from the key server
                 (signed, nonce-bound reply)                -> fail closed if unreachable
-      attested: attester evidence gates the key (mock only today)
-6. OpenPayload(content_key, payload.enc, payload_id)      -> AEAD; fail closed
-7. untar into CRYPTSHIP_EXTRACT (should be tmpfs)
-8. exec the app (args after `--`), app becomes PID 1
+      attested: verified attester evidence gates the key (no production
+                verifier yet; the server refuses --require-attestation)
+6. clock-rollback check (licenses with not_after): refuse if now is more than
+   24h behind the latest start recorded in CRYPTSHIP_STATE_DIR. The record is
+   sealed under a key derived from the content key; deleting it resets the
+   check, so it is best effort
+7. OpenPayload(content_key, payload.enc, payload_id)      -> AEAD; fail closed
+8. untar into CRYPTSHIP_EXTRACT (should be tmpfs; only an empty dir or one an
+   earlier run marked is emptied first)
+9. exec the app (args after `--`), app becomes PID 1
 ```
 
 Runtime config (env): `CRYPTSHIP_LICENSE`, `CRYPTSHIP_PAYLOAD`,
 `CRYPTSHIP_PUBKEY`, `CRYPTSHIP_EXTRACT`, `CRYPTSHIP_REVOCATION`
-(open | closed | grace:<duration>), `CRYPTSHIP_STATE_DIR` (revocation state) and
+(open | closed | grace:<duration>), `CRYPTSHIP_STATE_DIR` (revocation and clock
+state) and
 `CRYPTSHIP_REQUIRE_TMPFS` (refuse to run if the extract dir is not tmpfs). Put the extract dir on tmpfs:
 `docker run --tmpfs /run/cryptship` or k8s `emptyDir { medium: Memory }`.
 
@@ -135,13 +169,21 @@ Runtime config (env): `CRYPTSHIP_LICENSE`, `CRYPTSHIP_PAYLOAD`,
   the loader POSTs a nonce; the server returns the per-license secret (derived
   from a master secret via HKDF) signed with the vendor key and echoing the
   nonce. The loader verifies and unwraps. Revocation is immediate — the server
-  declines (410/403). Reference server: `cmd/cryptship-server`; demo:
+  declines (410 revoked; 403 attestation rejected). Reference server: `cmd/cryptship-server`; demo:
   `scripts/demo-online.sh`.
 - **attested** — like online, but the key broker releases the secret only after
   verifying TEE attestation evidence the loader attaches (via an `Attester`).
   Defends against host root **when the guest is vendor-controlled**; needs
-  confidential-compute hardware. Built behind an interface with a mock; a real
-  SEV-SNP/TDX attester + verifying KBS is the roadmap item.
+  confidential-compute hardware. The evidence must commit to
+  `online.AttestationNonce(license_id, nonce)`, so it cannot be reused for another
+  request nonce or license. Built behind the `Attester` (loader) and
+  `attest.Verifier` (server) interfaces, with test-only implementations; a real
+  SEV-SNP/TDX attester and verifier are the roadmap item. Until then
+  `cryptship-server --require-attestation` refuses to start. Known gap: the nonce
+  is chosen by the loader, not the server, and the secret is not encrypted to a
+  key held in the TEE, so a captured request with genuine evidence can be
+  replayed. A real deployment needs a server challenge and an ephemeral TEE key
+  in REPORT_DATA (as Trustee does).
 
 The software fingerprint (`pkg/machine`) derives one independent fingerprint per
 readable host identifier (`/etc/machine-id`, DMI UUID/serial); the loader tries

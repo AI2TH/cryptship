@@ -9,6 +9,10 @@ after the loader has decrypted the payload with a valid license.
 
 SECRET_SAUCE = "the-answer-is-42-do-not-leak"
 
+# A unique string scripts/demo.sh searches every image layer for. If it shows
+# up anywhere in the shipped image, the source leaked.
+SOURCE_MARKER = "CRYPTSHIP-DEMO-SOURCE-MARKER-6f1c9a2e"
+
 
 def proprietary_algorithm(x: int) -> int:
     # Pretend this is valuable IP worth protecting.

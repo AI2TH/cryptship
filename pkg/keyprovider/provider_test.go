@@ -10,11 +10,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/crypto"
-	"github.com/cryptship/cryptship/pkg/license"
-	"github.com/cryptship/cryptship/pkg/licenseserver"
-	"github.com/cryptship/cryptship/pkg/online"
+	"github.com/AI2TH/cryptship/pkg/attest/attesttest"
+	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/licenseserver"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
+
+// wrapForTest wraps contentKey under the KEK for claims c (all claims final)
+// and binding material, as `cryptship issue` does.
+func wrapForTest(t *testing.T, c license.Claims, material, contentKey []byte) []byte {
+	t.Helper()
+	bctx, err := c.BindingContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), bctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wk, err := crypto.WrapKey(kek, contentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wk
+}
 
 // serverBoundLicense builds a license whose content key is wrapped under the KEK
 // derived from the server-held binding secret (what `cryptship issue --binding
@@ -37,15 +57,7 @@ func serverBoundLicense(t *testing.T, priv ed25519.PrivateKey, master, contentKe
 	if err != nil {
 		t.Fatal(err)
 	}
-	kek, err := crypto.DeriveKEK(secret, []byte(c.LicenseID), c.BindingContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	wk, err := crypto.WrapKey(kek, contentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.WrappedKeys = [][]byte{wk}
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, secret, contentKey)}
 	lic, err := license.Sign(priv, c)
 	if err != nil {
 		t.Fatal(err)
@@ -62,9 +74,7 @@ func TestOfflineNoneRoundTrip(t *testing.T) {
 		IssuedAt: now, NotAfter: now + 3600,
 		Binding: license.Binding{Policy: license.BindNone}, UnboundSecret: secret,
 	}
-	kek, _ := crypto.DeriveKEK(secret, []byte(c.LicenseID), c.BindingContext())
-	wk, _ := crypto.WrapKey(kek, contentKey)
-	c.WrappedKeys = [][]byte{wk}
+	c.WrappedKeys = [][]byte{wrapForTest(t, c, secret, contentKey)}
 
 	got, err := Offline{}.ContentKey(context.Background(), &license.License{Claims: c})
 	if err != nil {
@@ -115,12 +125,7 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 
 	srv := &licenseserver.Server{
 		Master: master, SignKey: priv, KeyID: "v1", Revoked: map[string]bool{},
-		Verify: func(e []byte) error {
-			if len(e) == 0 {
-				return errors.New("no evidence")
-			}
-			return nil
-		},
+		Verifier: attesttest.Verifier{},
 	}
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -128,8 +133,8 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 	lic := serverBoundLicense(t, priv, master, contentKey, license.BindAttested, ts.URL)
 	ring := license.KeyRing{"v1": pub}
 
-	// Mock attester -> KBS accepts and returns the secret.
-	got, err := (Attested{Keys: ring, Client: ts.Client(), Attester: MockAttester{}}).ContentKey(context.Background(), lic)
+	// Test attester -> KBS accepts and returns the secret.
+	got, err := (Attested{Keys: ring, Client: ts.Client(), Attester: attesttest.Attester{}}).ContentKey(context.Background(), lic)
 	if err != nil {
 		t.Fatalf("attested ContentKey: %v", err)
 	}
@@ -141,4 +146,20 @@ func TestAttestedProviderRoundTrip(t *testing.T) {
 	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: DefaultAttester()}).ContentKey(context.Background(), lic); !errors.Is(err, ErrNoTEE) {
 		t.Fatalf("no-TEE: err = %v, want ErrNoTEE", err)
 	}
+
+	// Evidence that is not bound to this request's nonce (e.g. replayed from
+	// an earlier request) is refused by the server.
+	stale := staleAttester{bindData: online.AttestationNonce(lic.Claims.LicenseID, []byte("an-older-nonce!!"))}
+	if _, err := (Attested{Keys: ring, Client: ts.Client(), Attester: stale}).ContentKey(context.Background(), lic); !errors.Is(err, ErrDenied) {
+		t.Fatalf("evidence for another nonce: err = %v, want ErrDenied", err)
+	}
+}
+
+// staleAttester returns test evidence for a fixed bindData, ignoring the
+// request's.
+type staleAttester struct{ bindData []byte }
+
+func (staleAttester) Name() string { return "stale" }
+func (s staleAttester) Evidence(ctx context.Context, _ []byte) ([]byte, error) {
+	return attesttest.Attester{}.Evidence(ctx, s.bindData)
 }

@@ -7,6 +7,7 @@ package license
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,8 +15,18 @@ import (
 	"strconv"
 )
 
-// FormatVersion is the current license schema version.
-const FormatVersion = 1
+// License format versions. The version selects the KEK binding context, so it
+// is a crypto format change, not just a schema tag.
+const (
+	// FormatVersion1 binds a fixed subset of claims into the KEK (see
+	// bindingContextV1). Still accepted by the loader.
+	FormatVersion1 = 1
+	// FormatVersion2 binds a hash of every claim except wrapped_keys and
+	// unbound_secret into the KEK (see bindingContextV2).
+	FormatVersion2 = 2
+	// FormatVersion is the version new licenses are issued with.
+	FormatVersion = FormatVersion2
+)
 
 // ClockSkew is the tolerance (seconds) applied to issued_at so a slightly slow
 // client clock does not reject a fresh license.
@@ -49,7 +60,10 @@ type Binding struct {
 	ProviderData []byte `json:"provider_data,omitempty"`
 }
 
-// Claims is the signed portion of a license. Field order is significant.
+// Claims is the signed portion of a license. Field order is significant: the
+// v2 KEK context hashes the encoding/json form of this struct, so fields must
+// not be reordered or renamed, and any field added later must be `omitempty`
+// (and empty in existing licenses), or every v2 license stops unwrapping.
 type Claims struct {
 	Version    int    `json:"v"`
 	LicenseID  string `json:"license_id"`
@@ -86,10 +100,27 @@ type License struct {
 	Claims Claims `json:"-"`
 }
 
-// BindingContext is the fixed, language-independent byte layout of the claims
-// the KEK is bound to. Editing any of them changes the KEK, so a tampered
-// license cannot unwrap the content key even if signature checks are patched.
-func (c Claims) BindingContext() []byte {
+// BindingContext returns the bytes the KEK is bound to, selected by the claims
+// version. Editing anything the context covers changes the KEK, so a tampered
+// license cannot unwrap the content key even if signature checks are patched
+// out. Versions other than 1 and 2 are an error, never a fallback: the version
+// is itself part of both contexts, so editing it also breaks the unwrap.
+func (c Claims) BindingContext() ([]byte, error) {
+	switch c.Version {
+	case FormatVersion1:
+		return c.bindingContextV1(), nil
+	case FormatVersion2:
+		return c.bindingContextV2()
+	default:
+		return nil, fmt.Errorf("cryptship/license: no KEK binding context for license version %d", c.Version)
+	}
+}
+
+// bindingContextV1 is the fixed, language-independent byte layout of the v1
+// bound claims: version, license id, customer id, product, payload id, binding
+// policy, issued_at and not_after. Other claims are protected only by the
+// signature. Kept byte-for-byte so v1 licenses keep unwrapping.
+func (c Claims) bindingContextV1() []byte {
 	var b []byte
 	put := func(s string) { b = append(b, s...); b = append(b, 0) }
 	put("cryptship/kek-ctx/v1")
@@ -101,6 +132,30 @@ func (c Claims) BindingContext() []byte {
 	put(string(c.Binding.Policy))
 	b = binary.BigEndian.AppendUint64(b, uint64(c.IssuedAt))
 	return binary.BigEndian.AppendUint64(b, uint64(c.NotAfter))
+}
+
+// bindingContextV2 binds every claim: "cryptship/kek-ctx/v2" NUL followed by
+// SHA-256 of the canonical claims. Only the two fields that cannot be known
+// before wrapping are left out: wrapped_keys (the output of the wrap) and
+// unbound_secret (the binding material itself, for binding "none").
+func (c Claims) bindingContextV2() ([]byte, error) {
+	raw, err := canonicalClaims(c)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(raw)
+	b := append([]byte("cryptship/kek-ctx/v2"), 0)
+	return append(b, sum[:]...), nil
+}
+
+// canonicalClaims is the encoding hashed into the v2 context: encoding/json of
+// Claims (fields in declaration order, no maps, so the output is deterministic)
+// with wrapped_keys set to null and unbound_secret omitted. c is a copy, so the
+// caller's claims are not modified.
+func canonicalClaims(c Claims) ([]byte, error) {
+	c.WrappedKeys = nil
+	c.UnboundSecret = nil
+	return json.Marshal(c)
 }
 
 // Expired reports whether the license is outside its validity window at now.
@@ -122,6 +177,9 @@ func (c Claims) Validate() error {
 	}
 	if c.PayloadID == "" {
 		return errors.New("cryptship/license: empty payload_id")
+	}
+	if c.Version != FormatVersion1 && c.Version != FormatVersion2 {
+		return fmt.Errorf("cryptship/license: unsupported version %d", c.Version)
 	}
 	if c.NotAfter != 0 && c.NotAfter <= c.IssuedAt {
 		return errors.New("cryptship/license: not_after <= issued_at")
@@ -171,8 +229,8 @@ func Parse(b []byte) (*License, error) {
 	if l.Claims.Version == 0 {
 		return nil, errors.New("cryptship/license: missing version")
 	}
-	if l.Claims.Version > FormatVersion {
-		return nil, fmt.Errorf("cryptship/license: version %d newer than supported %d", l.Claims.Version, FormatVersion)
+	if l.Claims.Version < FormatVersion1 || l.Claims.Version > FormatVersion {
+		return nil, fmt.Errorf("cryptship/license: unsupported version %d (this build supports %d to %d)", l.Claims.Version, FormatVersion1, FormatVersion)
 	}
 	return &l, nil
 }

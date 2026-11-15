@@ -19,11 +19,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/archive"
-	"github.com/cryptship/cryptship/pkg/crypto"
-	"github.com/cryptship/cryptship/pkg/license"
-	"github.com/cryptship/cryptship/pkg/machine"
-	"github.com/cryptship/cryptship/pkg/online"
+	"github.com/AI2TH/cryptship/pkg/archive"
+	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/machine"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 func main() {
@@ -64,7 +64,7 @@ func usage() {
 
 usage:
   cryptship keygen       --out-priv vendor.key --out-pub vendor.pub [--key-id v1] [--force]
-  cryptship master-key   --out master.key
+  cryptship master-key   --out master.key [--force]
   cryptship fingerprint  [--all]
   cryptship pack         --in APPDIR --out payload.enc [--key-out content.key] [--transform-cmd CMD]
   cryptship issue        --priv vendor.key --content-key content.key --meta payload.json \
@@ -109,7 +109,15 @@ func cmdKeygen(args []string) error {
 func cmdMasterKey(args []string) error {
 	fs := flag.NewFlagSet("master-key", flag.ExitOnError)
 	out := fs.String("out", "master.key", "output path for the server master secret")
+	force := fs.Bool("force", false, "overwrite an existing master key (every online/attested license issued under it stops working)")
 	fs.Parse(args)
+	// Overwriting the master secret silently strands every license issued
+	// under it, so require --force as keygen does.
+	if !*force {
+		if _, err := os.Stat(*out); err == nil {
+			return fmt.Errorf("master-key: %s already exists; replacing it breaks every online/attested license issued with it (use --force to overwrite)", *out)
+		}
+	}
 	k, err := crypto.RandomKey()
 	if err != nil {
 		return err
@@ -225,6 +233,7 @@ func cmdIssue(args []string) error {
 	masterPath := fs.String("server-master-key", "", "server master secret (online/attested), from `cryptship master-key`")
 	revURL := fs.String("revocation-url", "", "optional revocation check URL")
 	out := fs.String("out", "license.json", "output license path")
+	licVersion := fs.Int("license-version", license.FormatVersion, "license format version: 2 binds every claim into the KEK; 1 only for loaders older than v2 support")
 	var fps stringList
 	fs.Var(&fps, "fingerprint", "bound machine fingerprint (repeatable; strict=1, pool>=1)")
 	var ents stringList
@@ -236,6 +245,9 @@ func cmdIssue(args []string) error {
 	}
 	if *binding == "" {
 		return errors.New("issue: --binding is required (none|strict|pool|online|attested)")
+	}
+	if *licVersion != license.FormatVersion1 && *licVersion != license.FormatVersion2 {
+		return fmt.Errorf("issue: --license-version must be %d or %d", license.FormatVersion1, license.FormatVersion2)
 	}
 
 	priv, err := readB64(*privPath)
@@ -278,8 +290,10 @@ func cmdIssue(args []string) error {
 		}
 	}
 
+	// Every claim must be final before wrapInto: with v2 the KEK context hashes
+	// all of them, so anything set after wrapping would break the unwrap.
 	claims := license.Claims{
-		Version:       license.FormatVersion,
+		Version:       *licVersion,
 		LicenseID:     lid,
 		CustomerID:    *customer,
 		Product:       *product,
@@ -359,12 +373,17 @@ func wrapInto(c *license.Claims, policy license.BindingPolicy, contentKey []byte
 }
 
 // wrapWith derives the KEK (binding material + claims context) and appends one
-// wrapped content key.
+// wrapped content key. All claims covered by the context must already be set.
 func wrapWith(c *license.Claims, material, contentKey []byte) error {
-	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), c.BindingContext())
+	bctx, err := c.BindingContext()
 	if err != nil {
 		return err
 	}
+	kek, err := crypto.DeriveKEK(material, []byte(c.LicenseID), bctx)
+	if err != nil {
+		return err
+	}
+	defer crypto.Wipe(kek)
 	wk, err := crypto.WrapKey(kek, contentKey)
 	if err != nil {
 		return err
@@ -373,19 +392,18 @@ func wrapWith(c *license.Claims, material, contentKey []byte) error {
 	return nil
 }
 
+// wrapPerFingerprint records every fingerprint hash first and only then wraps:
+// the v2 context covers binding.fingerprint_hashes, so wrapping inside the
+// same loop would give each key a different (and wrong) context.
 func wrapPerFingerprint(c *license.Claims, contentKey []byte, fps []string) error {
 	for _, fp := range fps {
-		kek, err := crypto.DeriveKEK([]byte(fp), []byte(c.LicenseID), c.BindingContext())
-		if err != nil {
-			return err
-		}
-		wk, err := crypto.WrapKey(kek, contentKey)
-		if err != nil {
-			return err
-		}
-		c.WrappedKeys = append(c.WrappedKeys, wk)
 		h := sha256.Sum256([]byte(fp))
 		c.Binding.FingerprintHashes = append(c.Binding.FingerprintHashes, hex.EncodeToString(h[:]))
+	}
+	for _, fp := range fps {
+		if err := wrapWith(c, []byte(fp), contentKey); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -408,7 +426,7 @@ func cmdInspect(args []string) error {
 		return err
 	}
 	c := lic.Claims
-	fmt.Printf("license id:   %s\n", c.LicenseID)
+	fmt.Printf("license id:   %s  (format v%d)\n", c.LicenseID, c.Version)
 	fmt.Printf("customer:     %s\n", c.CustomerID)
 	fmt.Printf("product:      %s  edition=%s\n", c.Product, c.Edition)
 	fmt.Printf("payload id:   %s\n", c.PayloadID)
