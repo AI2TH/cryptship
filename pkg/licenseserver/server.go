@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/online"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 // Server answers key requests. Master and SignKey are secret; SignKey's public

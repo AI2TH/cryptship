@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/keyprovider"
-	"github.com/cryptship/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/keyprovider"
+	"github.com/AI2TH/cryptship/pkg/license"
 )
 
 // buildProviders returns the key providers the loader will try, in order. The

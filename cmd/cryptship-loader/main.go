@@ -21,10 +21,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/archive"
-	"github.com/cryptship/cryptship/pkg/crypto"
-	"github.com/cryptship/cryptship/pkg/keyprovider"
-	"github.com/cryptship/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/archive"
+	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/keyprovider"
+	"github.com/AI2TH/cryptship/pkg/license"
 )
 
 type config struct {

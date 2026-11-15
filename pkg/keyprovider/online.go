@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cryptship/cryptship/pkg/crypto"
-	"github.com/cryptship/cryptship/pkg/license"
-	"github.com/cryptship/cryptship/pkg/machine"
-	"github.com/cryptship/cryptship/pkg/online"
+	"github.com/AI2TH/cryptship/pkg/crypto"
+	"github.com/AI2TH/cryptship/pkg/license"
+	"github.com/AI2TH/cryptship/pkg/machine"
+	"github.com/AI2TH/cryptship/pkg/online"
 )
 
 // HTTPClient is the minimal client the network providers need (satisfied by
