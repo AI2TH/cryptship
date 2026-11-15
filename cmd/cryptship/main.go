@@ -226,7 +226,8 @@ func cmdIssue(args []string) error {
 	customer := fs.String("customer", "", "customer id/name (required)")
 	product := fs.String("product", "", "product name (required)")
 	edition := fs.String("edition", "", "edition/tier")
-	expires := fs.String("expires", "", "expiry date YYYY-MM-DD")
+	expires := fs.String("expires", "", "expiry date YYYY-MM-DD: the license expires at 00:00:00 UTC that day (see --expires-end-of-day)")
+	endOfDay := fs.Bool("expires-end-of-day", false, "with --expires: stay valid through 23:59:59 UTC of that date")
 	days := fs.Int("days", 0, "expiry as N days from now (alternative to --expires)")
 	binding := fs.String("binding", "", "binding policy: none|strict|pool|online|attested (required)")
 	server := fs.String("server", "", "license/key-broker server URL (online/attested binding)")
@@ -277,7 +278,7 @@ func cmdIssue(args []string) error {
 	if lid == "" {
 		lid = "lic_" + randHex(8)
 	}
-	notAfter, err := resolveExpiry(*expires, *days)
+	notAfter, err := resolveExpiry(*expires, *days, *endOfDay)
 	if err != nil {
 		return err
 	}
@@ -338,7 +339,7 @@ func cmdIssue(args []string) error {
 	}
 	fmt.Printf("issued %s for %s/%s (binding=%s) -> %s\n", lid, *customer, *product, *binding, *out)
 	if notAfter != 0 {
-		fmt.Printf("expires: %s\n", time.Unix(notAfter, 0).UTC().Format("2006-01-02"))
+		fmt.Printf("expires: %s\n", time.Unix(notAfter, 0).UTC().Format(time.RFC3339))
 	}
 	return nil
 }
@@ -492,11 +493,23 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-func resolveExpiry(date string, days int) (int64, error) {
+// resolveExpiry turns --expires / --days into not_after (unix seconds, UTC).
+// --expires D alone means 00:00:00 UTC on D; with endOfDay, 23:59:59 UTC on
+// D (the license is valid while now <= not_after).
+func resolveExpiry(date string, days int, endOfDay bool) (int64, error) {
+	if endOfDay && date == "" {
+		return 0, errors.New("issue: --expires-end-of-day needs --expires")
+	}
+	if date != "" && days > 0 {
+		return 0, errors.New("issue: give --expires or --days, not both")
+	}
 	if date != "" {
 		t, err := time.Parse("2006-01-02", date)
 		if err != nil {
 			return 0, fmt.Errorf("issue: bad --expires: %w", err)
+		}
+		if endOfDay {
+			t = t.Add(24*time.Hour - time.Second)
 		}
 		return t.Unix(), nil
 	}
