@@ -8,9 +8,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -103,9 +100,6 @@ func run(cfg config) error {
 	if lic.Claims.Expired(time.Now().Unix()) {
 		return fmt.Errorf("license outside validity window (expires %d)", lic.Claims.NotAfter)
 	}
-	if err := enforceRevocation(lic, ring); err != nil {
-		return err
-	}
 
 	// 3. Acquire the content key via a provider matching the binding policy.
 	provider, err := keyprovider.Select(lic, buildProviders(ring)...)
@@ -117,6 +111,12 @@ func run(cfg config) error {
 		return fmt.Errorf("key acquisition (%s): %w", provider.Name(), err)
 	}
 	defer crypto.Wipe(contentKey)
+
+	// 3a. Optional revocation check. It runs after key acquisition so the
+	// grace record can be sealed under a key only this license unlocks.
+	if err := enforceRevocation(lic, ring, contentKey); err != nil {
+		return err
+	}
 
 	// 3b. Refuse a clock set back to keep an expiring license alive.
 	if err := checkClock(stateDir(), lic.Claims, contentKey, time.Now()); err != nil {
@@ -260,35 +260,46 @@ func stateFile(kind, licenseID string) string {
 // an id cannot point a state file outside the state dir.
 func escapeID(licenseID string) string { return url.PathEscape(licenseID) }
 
+// revocationStateInfo labels the sealed revocation-grace record.
+const revocationStateInfo = "cryptship/revocation-grace/v1"
+
 // enforceRevocation performs the optional revocation check and applies the
 // operator's failure policy (CRYPTSHIP_REVOCATION): "open" (default, run on
-// error), "closed" (refuse on error), "grace:<dur>" (run if a prior successful
-// check is younger than <dur>). Only "closed" is a hard guarantee.
+// error), "closed" (refuse on error), "grace:<dur>" (run if a prior signed
+// "not revoked" answer is younger than <dur>). Only "closed" is a hard
+// guarantee.
 //
 // A cryptship-server signs the check response; the loader verifies it against
 // the vendor key ring, so an on-path attacker or captive portal cannot forge
-// "not revoked". In "closed" mode an UNSIGNED "active" answer is rejected.
-func enforceRevocation(lic *license.License, ring license.KeyRing) error {
+// "not revoked". In "closed" mode an UNSIGNED "active" answer is rejected, and
+// only a signed answer refreshes the grace record.
+//
+// The time of the last signed success is sealed (AES-GCM) under a key derived
+// from secret, so editing or copying the record does not extend grace, and a
+// record dated in the future (clock set back) does not count.
+func enforceRevocation(lic *license.License, ring license.KeyRing, secret []byte) error {
 	if lic.Claims.RevocationURL == "" {
 		return nil
 	}
 	mode := env("CRYPTSHIP_REVOCATION", "open")
-	sf := stateFile("revocation", lic.Claims.LicenseID)
+	st := sealedState{info: revocationStateInfo, licenseID: lic.Claims.LicenseID, path: stateFile("revocation", lic.Claims.LicenseID)}
 
 	revoked, signed, err := checkRevocation(lic, ring)
 	if err == nil && revoked {
 		return fmt.Errorf("license %s has been revoked", lic.Claims.LicenseID)
 	}
-	if err == nil && (signed || mode != "closed") {
+	if err == nil && signed {
 		// Only a SIGNED "active" answer refreshes the grace clock; an unsigned
 		// answer (captive portal / on-path) must not be able to extend grace.
-		if signed {
-			_ = os.MkdirAll(filepath.Dir(sf), 0o700)
-			_ = os.WriteFile(sf, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600)
+		if werr := st.write(secret, time.Now().Unix()); werr != nil && strings.HasPrefix(mode, "grace:") {
+			warnf("revocation grace record not written: %v", werr)
 		}
 		return nil
 	}
-	if err == nil && !signed && mode == "closed" {
+	if err == nil { // an unsigned "not revoked": accepted unless closed, never refreshes grace
+		if mode != "closed" {
+			return nil
+		}
 		err = errors.New("revocation response was unsigned; CRYPTSHIP_REVOCATION=closed requires a signing cryptship-server")
 	}
 
@@ -296,30 +307,37 @@ func enforceRevocation(lic *license.License, ring license.KeyRing) error {
 	case mode == "closed":
 		return fmt.Errorf("revocation check failed and CRYPTSHIP_REVOCATION=closed: %w", err)
 	case strings.HasPrefix(mode, "grace:"):
-		if d, perr := time.ParseDuration(strings.TrimPrefix(mode, "grace:")); perr == nil {
-			if b, rerr := os.ReadFile(sf); rerr == nil {
-				// A last-success time in the future (clock set back, or a
-				// hand-edited file) does not count as within grace.
-				if last, lerr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); lerr == nil &&
-					last <= time.Now().Unix()+license.ClockSkew &&
-					time.Since(time.Unix(last, 0)) <= d {
-					fmt.Fprintln(os.Stderr, "cryptship-loader: revocation check failed, within grace:", err)
-					return nil
-				}
-			}
+		d, perr := time.ParseDuration(strings.TrimPrefix(mode, "grace:"))
+		if perr != nil {
+			return fmt.Errorf("bad CRYPTSHIP_REVOCATION %q: %w", mode, perr)
 		}
-		return fmt.Errorf("revocation check failed and no successful check within grace: %w", err)
+		last, rerr := st.read(secret)
+		now := time.Now().Unix()
+		switch {
+		case rerr != nil:
+			if errors.Is(rerr, errBadState) {
+				warnf("revocation grace record %s is not valid for this license; ignored", st.path)
+			}
+		case last > now+license.ClockSkew:
+			// A last success in the future (clock set back) is not within grace.
+			warnf("revocation grace record %s is dated in the future; ignored", st.path)
+		case time.Since(time.Unix(last, 0)) <= d:
+			fmt.Fprintln(os.Stderr, "cryptship-loader: revocation check failed, within grace:", err)
+			return nil
+		}
+		return fmt.Errorf("revocation check failed and no signed successful check within grace: %w", err)
 	default:
 		fmt.Fprintln(os.Stderr, "cryptship-loader: revocation check skipped (fail-open):", err)
 		return nil
 	}
 }
 
-// checkRevocation returns (revoked, signed, err). It sends a nonce and, if the
-// server returns a signed online.CheckResponse that verifies against the ring
-// and echoes the nonce, trusts its Revoked flag (signed=true). Otherwise it
-// falls back to the legacy status-code reading (200 active / 410 revoked),
-// reported as unsigned.
+// checkRevocation returns (revoked, signed, err). It sends a nonce; a signed
+// online.CheckResponse that verifies against the ring and answers this license
+// and nonce is authoritative (signed=true). A signed answer that fails to
+// verify or has expired is an error. Anything else (not a signed answer, or
+// one for another license or nonce) falls back to the legacy status-code
+// reading (200 active / 410 revoked), reported as unsigned.
 func checkRevocation(lic *license.License, ring license.KeyRing) (revoked bool, signed bool, err error) {
 	u, err := url.Parse(lic.Claims.RevocationURL)
 	if err != nil {
@@ -345,23 +363,17 @@ func checkRevocation(lic *license.License, ring license.KeyRing) (revoked bool, 
 		return false, false, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, online.MaxResponseBytes))
+	if err != nil {
+		return false, false, err
+	}
 
-	// Signed path: a valid, nonce-matching CheckResponse is authoritative.
-	var cr online.CheckResponse
-	if json.Unmarshal(body, &cr) == nil && len(cr.Sig) > 0 &&
-		cr.LicenseID == lic.Claims.LicenseID && bytes.Equal(cr.Nonce, nonce) {
-		pub, ok := ring[cr.SigningKeyID]
-		if !ok {
-			pub, ok = ring["*"]
-		}
-		if !ok || len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, online.CheckSigningInput(cr), cr.Sig) {
-			return false, false, errors.New("revocation check: bad response signature")
-		}
-		if cr.NotAfter != 0 && time.Now().Unix() > cr.NotAfter {
-			return false, false, errors.New("revocation check: response expired")
-		}
+	cr, verr := online.VerifyCheckResponse(body, ring, lic.Claims.LicenseID, nonce, time.Now())
+	switch {
+	case verr == nil:
 		return cr.Revoked, true, nil
+	case !errors.Is(verr, online.ErrUnsigned) && !errors.Is(verr, online.ErrMismatch):
+		return false, false, fmt.Errorf("revocation check: %w", verr)
 	}
 
 	// Legacy unsigned path.

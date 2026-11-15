@@ -159,13 +159,12 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := online.CheckResponse{
-		LicenseID:    id,
-		Nonce:        nonce,
-		Revoked:      revoked,
-		NotAfter:     time.Now().Add(s.ttl()).Unix(),
-		SigningKeyID: s.KeyID,
+		LicenseID: id,
+		Nonce:     nonce,
+		Revoked:   revoked,
+		NotAfter:  time.Now().Add(s.ttl()).Unix(),
 	}
-	resp.Sig = ed25519.Sign(s.SignKey, online.CheckSigningInput(resp))
+	online.SignCheck(s.SignKey, s.KeyID, &resp)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
