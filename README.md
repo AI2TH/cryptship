@@ -49,21 +49,23 @@ content_key = unwrap(license.wrapped_key, KEK)
 plaintext   = aead_open(payload.enc, content_key)   # wrong key => AEAD tag fails
 ```
 
-Run on an unbound machine, or edit any claim, and the unwrap fails. Licenses
-issued now are format v2, which binds a hash of **every** claim into the KEK
-(everything except the wrapped keys themselves and, for binding `none`, the
-unbound secret), so removing `revocation_url` or adding an entitlement breaks
-the unwrap even in a loader with the signature check patched out. Older v1
-licenses still load; their KEK covers only license and customer id, product,
+Run on an unbound machine, or edit a bound claim, and the unwrap fails.
+Licenses issued now are format v2, which binds a hash of **every** claim into
+the KEK (everything except the wrapped keys themselves and, for binding `none`,
+the unbound secret), so removing `revocation_url` or adding an entitlement
+breaks the unwrap even in a loader with the signature check patched out. Older
+v1 licenses still load; their KEK covers only license and customer id, product,
 payload id, binding policy, issue and expiry dates, and their other claims are
-protected only by the signature. Two checks remain ordinary code in the loader:
-the **signature** and the **expiry** check. Patch those out and an *unedited*
-expired license still unwraps on its own machine, so for enforced expiry use the
-`online` provider. The loader also refuses to start when the clock is more than
-24 hours behind the latest start it recorded for an expiring license (sealed in
+protected only by the signature.
+
+Two checks remain ordinary code in the loader: the **signature** and the
+**expiry** check. Patch those out and an *unedited* expired license still
+unwraps on its own machine, so for enforced expiry use the `online` provider.
+The loader also refuses to start when the clock is more than 24 hours behind
+the latest start it recorded for an expiring license (sealed in
 `CRYPTSHIP_STATE_DIR`), but deleting that state resets the check: it stops a
-casual clock rollback, not a determined one. With binding `none`, the license itself carries the key
-material: treat it like a secret.
+casual clock rollback, not a determined one. With binding `none`, the license
+itself carries the key material: treat it like a secret.
 
 ## Quickstart
 
@@ -83,9 +85,8 @@ go install github.com/AI2TH/cryptship/cmd/...@latest
 
 The demo packs a tiny Python app, issues a license, builds the image, then
 **`docker save`s it, unpacks every layer and greps for a marker planted in the
-app's source** to show the source isn't there,
-runs it to show it decrypts and works, and finally tampers with the license to
-show the loader refuses it.
+app's source** to show the source isn't there, runs it to show it decrypts and
+works, and finally tampers with the license to show the loader refuses it.
 
 ## Documentation
 
