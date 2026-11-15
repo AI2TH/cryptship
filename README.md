@@ -39,31 +39,37 @@ the payload into tmpfs, and `exec`s your app.
 
 ### The one principle that makes this real
 
-There is **no "is the license valid?" boolean** for an attacker to patch. The
-content key is *derived from the license and binding material*, so a valid
-signature and a successful decrypt are the same event:
+**Binding is cryptographic, not a boolean.** The content key is *derived from
+the license and the binding material*, so there is no "is this the right
+machine?" branch to patch:
 
 ```
-content_key = unwrap(license.wrapped_key, KEK = derive(machine_fingerprint, license_id))
+KEK         = HKDF(machine_fingerprint, license_id, bound claims)
+content_key = unwrap(license.wrapped_key, KEK)
 plaintext   = aead_open(payload.enc, content_key)   # wrong key => AEAD tag fails
 ```
 
-Tamper with the license, or run on an unbound machine, and the unwrap produces
-nothing usable. There is no code path that decrypts without legitimate license
-material.
+Run on an unbound machine, or edit a bound claim (license and customer id,
+product, payload id, binding policy, issue and expiry dates), and the unwrap
+fails. Two checks remain ordinary code in the loader: the **signature** and the
+**expiry** check. Patch those out and an *unedited* expired license still unwraps
+on its own machine, so for enforced expiry use the `online` provider. Claims
+outside the KEK context (edition, entitlements, `revocation_url`) are protected
+only by the signature. With binding `none`, the license itself carries the key
+material: treat it like a secret.
 
 ## Quickstart
 
 Requires a working `docker` (e.g. [colima](https://github.com/abiosoft/colima)
-on macOS). Nothing else is installed on the host — the tools compile in a Go
-container.
+on macOS) and `python3` (used by the demo's tamper step). The tools compile in a
+Go container.
 
 ```bash
 bash scripts/demo.sh
 ```
 
 The demo packs a tiny Python app, issues a license, builds the image, then
-**`docker save`s it and greps every layer** to prove the source isn't there,
+**`docker save`s it, unpacks it and greps the result** to show the source isn't there,
 runs it to show it decrypts and works, and finally tampers with the license to
 show the loader refuses it.
 
@@ -86,7 +92,7 @@ acquired**. That is a single pluggable interface (`pkg/keyprovider`):
 |---|---|---|---|
 | **Air-gapped** | `offline` | machine fingerprint, or none | expiry only |
 | **On-prem / cloud** | `online` | per-license secret held by your server | **real** — the server declines |
-| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | real + anti-tamper |
+| **Confidential** | `attested` | SEV-SNP/TDX attestation gates the key | planned: interface + mock only today |
 
 The loader, license format, crypto, and app are identical across all modes — only
 the key provider differs. `offline` (none/strict/pool) and `online` are built and
@@ -109,7 +115,9 @@ source reconstruction:
   (Nuitka for native code is a one-line swap); proof in `scripts/demo-compiled.sh`.
 - **Runtime hardening** — the loader marks itself non-dumpable; run the container
   with the seccomp profile + non-root + dropped caps + read-only + tmpfs from
-  `deploy/`. Stops a non-root / in-container attacker (not host root).
+  `deploy/`. Stops other non-root users in the container; anything running as
+  the app's own uid, container root or host root can still read the decrypted
+  files.
 - **Per-license watermark** — the loader drops `.cryptship-manifest.json` and
   exposes `CRYPTSHIP_LICENSE_ID` / `CRYPTSHIP_CUSTOMER` to the app, so a leaked
   instance traces to its licensee (a deterrent — strippable).
@@ -130,8 +138,8 @@ for the full schema and the threat model.
 ## Status
 
 **Built & tested:** AES-256-GCM payload encryption; Ed25519 licenses (detached
-signature over the stored bytes); context-bound KEK (editing a claim breaks the
-unwrap); machine binding (none / strict / pool); online key provider + reference
+signature over the stored bytes); context-bound KEK (editing a bound claim breaks
+the unwrap); machine binding (none / strict / pool); online key provider + reference
 `cryptship-server`; signing-key rotation (key ring); configurable revocation
 (open / closed / grace); the compile/transform seam; loader + container
 hardening; per-license watermarking; and the attested (confidential-compute)

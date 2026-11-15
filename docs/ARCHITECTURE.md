@@ -32,9 +32,11 @@ pkg/crypto      AES-256-GCM (Seal/Open), HKDF-SHA256 KEK derivation, key wrap
 pkg/license     signed claims + Ed25519 sign/verify, canonical encoding
 pkg/machine     software machine fingerprint (stable host identifiers -> hash)
 pkg/archive     tar pack + traversal-safe untar
-pkg/keyprovider Provider interface; `offline` implementation
-cmd/cryptship   vendor CLI: keygen, fingerprint, pack, issue, inspect
+pkg/keyprovider Provider interface; `offline`, `online` and `attested` (mock attester) providers
+pkg/online, pkg/licenseserver  online key protocol and the reference key server
+cmd/cryptship   vendor CLI: keygen, master-key, fingerprint, pack, issue, inspect
 cmd/cryptship-loader  image ENTRYPOINT: verify -> get key -> decrypt -> exec
+cmd/cryptship-server  reference key server for the `online` provider
 ```
 
 ## Key hierarchy
@@ -51,9 +53,10 @@ KEK = HKDF(binding_material, salt = license_id)     -> wraps the content key
   is wrapped differently into each customer's license.
 - The **KEK** never leaves the machine and is never stored; it is re-derived at
   load time from live binding material.
-- **Validity == decryptability:** because the wrapped key lives in the signed
-  claims and the KEK comes from binding material, there is no separate check to
-  bypass. Wrong signature or wrong machine ⇒ AEAD tag failure ⇒ no plaintext.
+- **Binding == decryptability:** because the wrapped key lives in the license
+  and the KEK comes from binding material plus the bound claims, the wrong machine
+  or an edited bound claim ⇒ AEAD tag failure ⇒ no plaintext. The signature and
+  expiry are separate loader checks; `online` enforces expiry server-side.
 
 ## License format
 
@@ -100,17 +103,24 @@ image  ──> loader + payload.enc + license.json + vendor.pub   (no source, no
 1. read vendor.pub, license.json
 2. verify Ed25519 signature            -> fail closed
 3. check not_after / issued_at window  -> fail closed
-4. (optional) revocation check         -> 410 Gone = revoked (fail closed); network error = skip
+4. (optional) revocation_url check     -> 410 Gone = revoked (fail closed); network error =
+                                          CRYPTSHIP_REVOCATION policy: open (run, default), closed (refuse),
+                                          grace:<duration> (run if the last good check is younger)
 5. provider.ContentKey(license):
-      offline: derive KEK from machine fingerprint (or unbound secret),
-               unwrap one of wrapped_keys                 -> fail closed on no match
+      offline:  derive KEK from machine fingerprint (or unbound secret),
+                unwrap one of wrapped_keys                -> fail closed on no match
+      online:   fetch the per-license binding secret from the key server
+                (signed, nonce-bound reply)                -> fail closed if unreachable
+      attested: attester evidence gates the key (mock only today)
 6. OpenPayload(content_key, payload.enc, payload_id)      -> AEAD; fail closed
 7. untar into CRYPTSHIP_EXTRACT (should be tmpfs)
 8. exec the app (args after `--`), app becomes PID 1
 ```
 
 Runtime config (env): `CRYPTSHIP_LICENSE`, `CRYPTSHIP_PAYLOAD`,
-`CRYPTSHIP_PUBKEY`, `CRYPTSHIP_EXTRACT`. Put the extract dir on tmpfs:
+`CRYPTSHIP_PUBKEY`, `CRYPTSHIP_EXTRACT`, `CRYPTSHIP_REVOCATION`
+(open | closed | grace:<duration>), `CRYPTSHIP_STATE_DIR` (revocation state) and
+`CRYPTSHIP_REQUIRE_TMPFS` (refuse to run if the extract dir is not tmpfs). Put the extract dir on tmpfs:
 `docker run --tmpfs /run/cryptship` or k8s `emptyDir { medium: Memory }`.
 
 ## Binding policies
@@ -172,14 +182,19 @@ remote execution.
 
 - **Offline:** by expiry. Issue short-lived licenses and renew. A distributed
   denylist only helps for clients that check in.
-- **Online (roadmap):** the license/KMS server simply refuses to return the key.
+- **Online:** the key server refuses to return the binding secret for a revoked
+  license, so its next start fails (revoke with `cryptship-server --revoke`;
+  running instances keep running). An online-bound app does not start while the
+  server is unreachable.
 
 ## Roadmap
 
 1. **TPM provider** — seal the content key to the TPM so a copied license is
    useless off the physical machine, even to root.
-2. **Online provider + reference license server** — short-lived keys, real
-   revocation, seat management, machine (re)activation API.
+2. **Online provider + reference license server** — IMPLEMENTED (signed,
+   nonce-bound replies; revocation by denylist). Still open: seat management
+   (the `machine` field is sent but not enforced), machine (re)activation API,
+   and offline grace caching of the online key.
 3. **Cloud KMS provider** — wrap the content key with AWS/GCP/Azure KMS; unwrap
    gated by cloud IAM + signed instance identity.
 4. **Confidential-compute provider** — SEV-SNP/TDX with remote attestation; the

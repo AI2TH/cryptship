@@ -68,7 +68,8 @@ spec:
 | Attacker | Stopped? |
 |---|---|
 | Someone with just the image (not running it) | **Yes** — ciphertext only. |
-| A non-root process / compromised app user in the container | **Yes** — seccomp + non-root + dropped caps block ptrace/mem-read. |
+| Another non-root user in the container | **Yes** — seccomp + non-root + dropped caps block ptrace/mem-read of the app. |
+| Code running as the app's own uid | **No** — it can read the decrypted files in the extract directory. |
 | **Container or host root with a privileged sidecar** | **No** — root can run a process outside this profile and read `/proc/<pid>/mem`. |
 | Host root dumping guest RAM | **No** — needs a confidential-compute key provider (SEV-SNP/TDX), on the roadmap. |
 

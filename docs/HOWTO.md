@@ -222,8 +222,8 @@ can roll keys without breaking already-issued licenses:
 
 ```
 # vendor.pub (ring form)
-v1 MCowBQYDK2Vw...oldkey...
-v2 MCowBQYDK2Vw...newkey...
+v1 <old vendor.pub contents: base64 of the raw 32-byte key, as written by keygen>
+v2 <new vendor.pub contents>
 ```
 Issue new licenses with `--key-id v2`; the loader verifies each license with the
 key named by its `signing_key_id`. A single plain base64 key still works (matches
