@@ -192,3 +192,89 @@ func isUnder(p, dir string) bool {
 	}
 	return rel != ".." && !bytes.HasPrefix([]byte(rel), []byte(".."+string(os.PathSeparator)))
 }
+
+// A symlink target that is lexically inside dest can still resolve outside it
+// when it passes through another symlink: s -> "." makes "s/.." the parent of
+// dest. Both entry orders are tried, since a check that only looks at links
+// that already exist is defeated by creating the inner link last.
+func TestUntarRejectsChainedSymlinkEscape(t *testing.T) {
+	orders := map[string][]entry{
+		"inner link first": {
+			{name: "s", typ: tar.TypeSymlink, link: "."},
+			{name: "t", typ: tar.TypeSymlink, link: "s/.."},
+		},
+		"inner link last": {
+			{name: "t", typ: tar.TypeSymlink, link: "s/.."},
+			{name: "s", typ: tar.TypeSymlink, link: "."},
+		},
+		"nested": {
+			{name: "d/s", typ: tar.TypeSymlink, link: ".."},
+			{name: "d/t", typ: tar.TypeSymlink, link: "s/../x"},
+		},
+	}
+	for name, entries := range orders {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			dest := filepath.Join(parent, "dest")
+			err := Untar(buildTar(t, entries), dest)
+			for _, e := range entries {
+				p := filepath.Join(dest, filepath.FromSlash(e.name))
+				if _, lerr := os.Lstat(p); lerr != nil {
+					continue
+				}
+				real, rerr := filepath.EvalSymlinks(p)
+				if rerr != nil {
+					continue // dangling: fine
+				}
+				destReal, _ := filepath.EvalSymlinks(dest)
+				if !isUnder(real, destReal) && real != destReal {
+					t.Errorf("SECURITY: %s resolves outside dest to %s (Untar err=%v)", e.name, real, err)
+				}
+			}
+			if err == nil {
+				t.Errorf("Untar accepted a chained-symlink escape without error")
+			}
+		})
+	}
+}
+
+// Ordinary relative links, including ones that climb out of their own
+// directory, keep working.
+func TestUntarAllowsContainedSymlinks(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "dest")
+	data := buildTar(t, []entry{
+		{name: "lib/real.so", typ: tar.TypeReg, body: []byte("so")},
+		{name: "lib/alias.so", typ: tar.TypeSymlink, link: "real.so"},
+		{name: "bin/tool", typ: tar.TypeSymlink, link: "../lib/real.so"},
+		{name: "bin/here", typ: tar.TypeSymlink, link: "./tool"},
+		{name: "a/b/c/deep", typ: tar.TypeSymlink, link: "../../../lib/alias.so"},
+		{name: "self", typ: tar.TypeSymlink, link: "."},
+	})
+	if err := Untar(data, dest); err != nil {
+		t.Fatalf("Untar: %v", err)
+	}
+	for _, p := range []string{"lib/alias.so", "bin/tool", "bin/here", "a/b/c/deep"} {
+		if b, err := os.ReadFile(filepath.Join(dest, p)); err != nil || string(b) != "so" {
+			t.Errorf("%s: %q, %v", p, b, err)
+		}
+	}
+}
+
+// TarDir refuses, at pack time, what Untar would refuse at load time.
+func TestTarDirRejectsWhatUntarRefuses(t *testing.T) {
+	for name, link := range map[string]string{
+		"absolute": "/etc/passwd",
+		"escaping": "../outside",
+		"chained":  "x/../..",
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := t.TempDir()
+			if err := os.Symlink(link, filepath.Join(src, "l")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := TarDir(src); err == nil {
+				t.Fatalf("TarDir accepted symlink -> %s", link)
+			}
+		})
+	}
+}
