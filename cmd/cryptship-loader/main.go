@@ -36,7 +36,10 @@ type config struct {
 	payloadPath string
 	pubKeyPath  string
 	extractDir  string
-	command     []string
+	// memfdEntry, when set (CRYPTSHIP_EXEC_MEMFD), names a single ELF binary in
+	// the payload that is executed from a memfd; nothing is extracted.
+	memfdEntry string
+	command    []string
 }
 
 func main() {
@@ -60,6 +63,7 @@ func parseConfig(args []string) config {
 		payloadPath: env("CRYPTSHIP_PAYLOAD", "/cryptship/payload.enc"),
 		pubKeyPath:  env("CRYPTSHIP_PUBKEY", "/cryptship/vendor.pub"),
 		extractDir:  env("CRYPTSHIP_EXTRACT", "/run/cryptship/app"),
+		memfdEntry:  os.Getenv("CRYPTSHIP_EXEC_MEMFD"),
 	}
 	for i, a := range args {
 		if a == "--" {
@@ -74,6 +78,10 @@ func parseConfig(args []string) config {
 func run(cfg config) error {
 	// 0. Mark the loader non-dumpable while the key/plaintext are in its memory.
 	hardenProcess()
+	user, err := appUserFromEnv()
+	if err != nil {
+		return err
+	}
 
 	// 1. Load and verify the license signature against the key ring.
 	ringBytes, err := os.ReadFile(cfg.pubKeyPath)
@@ -133,6 +141,20 @@ func run(cfg config) error {
 		return fmt.Errorf("decrypt payload (tampered or wrong key): %w", err)
 	}
 
+	// 5a. Single-binary payloads can run from memory with nothing on disk.
+	if cfg.memfdEntry != "" {
+		bin, err := archive.ReadFile(tarBytes, cfg.memfdEntry, archive.DefaultMaxExtractBytes)
+		crypto.Wipe(tarBytes)
+		if err != nil {
+			return fmt.Errorf("CRYPTSHIP_EXEC_MEMFD: %w", err)
+		}
+		argv := cfg.command
+		if len(argv) == 0 {
+			argv = []string{filepath.Base(cfg.memfdEntry)}
+		}
+		return execMemfd(bin, argv, appEnv(lic.Claims), user)
+	}
+
 	// 5. Extract into the runtime dir, enforcing/warning tmpfs before writing.
 	if err := prepareDir(cfg.extractDir); err != nil {
 		return err
@@ -147,9 +169,15 @@ func run(cfg config) error {
 	if err := writeManifest(cfg.extractDir, lic.Claims); err != nil {
 		fmt.Fprintln(os.Stderr, "cryptship-loader: WARNING: manifest not written:", err)
 	}
+	if user != nil {
+		// The app may read and run its code, but not change it.
+		if err := secureTree(cfg.extractDir, user.owner, user.gid); err != nil {
+			return fmt.Errorf("hand extract dir to uid %d, gid %d: %w", user.owner, user.gid, err)
+		}
+	}
 
 	// 6. Hand off to the real application.
-	return execApp(cfg, lic.Claims)
+	return execApp(cfg, lic.Claims, user)
 }
 
 // extractMarker is created in the extract dir before anything is extracted,
@@ -202,29 +230,39 @@ func hasEntry(entries []os.DirEntry, name string) bool {
 	return false
 }
 
-func execApp(cfg config, c license.Claims) error {
+func execApp(cfg config, c license.Claims, user *appUser) error {
 	if len(cfg.command) == 0 {
 		cfg.command = []string{"./entrypoint"}
 	}
 	if err := os.Chdir(cfg.extractDir); err != nil {
 		return fmt.Errorf("chdir: %w", err)
 	}
+	if user != nil {
+		if err := dropPrivileges(user); err != nil {
+			return err
+		}
+	}
 	resolved, err := exec.LookPath(cfg.command[0])
 	if err != nil {
 		return fmt.Errorf("locate command %q: %w", cfg.command[0], err)
 	}
+	return syscall.Exec(resolved, cfg.command, appEnv(c))
+}
+
+// appEnv is the app's environment: the loader's, minus CRYPTSHIP_* settings,
+// plus the license watermark variables.
+func appEnv(c license.Claims) []string {
 	var envv []string
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "CRYPTSHIP_") {
 			envv = append(envv, kv)
 		}
 	}
-	envv = append(envv,
+	return append(envv,
 		"CRYPTSHIP_LICENSE_ID="+c.LicenseID,
 		"CRYPTSHIP_CUSTOMER="+c.CustomerID,
 		"CRYPTSHIP_PAYLOAD_ID="+c.PayloadID,
 	)
-	return syscall.Exec(resolved, cfg.command, envv)
 }
 
 // writeManifest drops a per-license marker into the extracted tree so a leaked
