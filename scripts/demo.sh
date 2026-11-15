@@ -10,6 +10,8 @@
 #      every layer, grep for a marker planted in the app's source)
 #   5. RUN it (decrypts into tmpfs, app works)
 #   6. NEGATIVE: tamper the license -> loader refuses to run
+#   7. HARDENED: loader starts as root, extracts as another owner, drops to
+#      the app user, which cannot modify its code
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -70,6 +72,22 @@ if docker run --rm --tmpfs /run/cryptship \
 fi
 echo "   loader refused it:"
 sed 's/^/   > /' "$WORK/err.txt"
+
+echo
+echo "== 7. HARDENED: start as root, extract as another owner, drop to 65532 =="
+docker run --rm --user 0:0 -e CRYPTSHIP_APP_USER=65532:65532 \
+  --read-only --tmpfs /run/cryptship:rw,mode=0755 \
+  --cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID \
+  --security-opt=no-new-privileges --security-opt seccomp="$ROOT/deploy/seccomp.json" \
+  -e CRYPTSHIP_REQUIRE_TMPFS=1 \
+  --entrypoint /cryptship-loader cryptship-demo -- sh -c '
+    echo "   app runs as uid $(id -u), gid $(id -g)"
+    python app.py | sed "s/^/   /"
+    if (echo x >> app.py) 2>/dev/null || (touch planted.py) 2>/dev/null; then
+      echo "!! the app could modify its own code"; exit 1
+    fi
+    echo "   the app cannot modify its code: app.py is $(stat -c "%u:%g %a" app.py)"' \
+  2> >(grep -v "clock-rollback check disabled" >&2)
 
 echo
 echo "Demo complete."
